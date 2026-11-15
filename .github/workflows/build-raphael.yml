@@ -1,0 +1,354 @@
+# =============================================================================
+#  Redmi K20 Pro / Mi 9T Pro (raphael / raphaelin, SM8150, Linux 4.14)
+#  KernelSU Next + SUSFS + ccache  ->  AnyKernel3 可直刷 zip
+#
+#  默认源码 : SOVIET-ANDROID/kernel_xiaomi_raphael @ 16.0-SUSFS (4.14.357)
+#  默认工具链: AOSP clang r547379 (crDroid prebuilt 镜像, 上游 CI 同款)
+#  默认打包 : SOVIET-ANDROID/AnyKernel3 (devicecheck raphael/raphaelin)
+# =============================================================================
+name: Build Kernel · raphael
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: "内核源码仓库 URL（留空=直接构建本仓库）"
+        required: false
+        default: ""
+      kernel_branch:
+        description: "源码分支/标签（仅当填了 kernel_repo 时使用）"
+        required: false
+        default: "16.0-SUSFS"
+      defconfig:
+        description: "defconfig 名称"
+        required: false
+        default: "raphael_defconfig"
+      localversion:
+        description: "内核版本后缀，如 SOVIET-STAR（留空=保持源码默认）"
+        required: false
+        default: ""
+      ksu_enable:
+        description: "启用 KernelSU Next"
+        type: boolean
+        default: true
+      susfs_enable:
+        description: "启用 SUSFS"
+        type: boolean
+        default: true
+      hook_mode:
+        description: "KernelSU hook 方式（4.14 必须用 manual）"
+        type: choice
+        options:
+          - manual
+          - kprobe
+        default: manual
+      ccache_enable:
+        description: "启用 ccache"
+        type: boolean
+        default: true
+      release:
+        description: "构建成功后发布 GitHub Release"
+        type: boolean
+        default: false
+      release_tag:
+        description: "Release tag（留空=raphael-<run_number>）"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kernel-raphael-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build raphael kernel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      KERNEL_REPO: ${{ inputs.kernel_repo }}
+      KERNEL_BRANCH: ${{ inputs.kernel_branch }}
+      DEFCONFIG_NAME: ${{ inputs.defconfig }}
+      LOCALVERSION_SUFFIX: ${{ inputs.localversion }}
+      HOOK_MODE: ${{ inputs.hook_mode }}
+      KSU_ENABLE: ${{ inputs.ksu_enable }}
+      SUSFS_ENABLE: ${{ inputs.susfs_enable }}
+      CCACHE_ENABLE: ${{ inputs.ccache_enable }}
+      # ---- 构建参数 ----
+      KBUILD_BUILD_USER: gha
+      KBUILD_BUILD_HOST: github-actions
+      TOOLCHAIN_DIR: ${{ github.workspace }}/toolchain/clang-r547379
+      CCACHE_COMPILERCHECK: "string:clang-r547379"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+    steps:
+      # ---------------------------------------------------------------- 源码
+      - name: Checkout (build repo)
+        uses: actions/checkout@v4
+        with:
+          path: kernel
+          fetch-depth: 1
+          submodules: false
+
+      - name: Checkout (external kernel source)
+        if: inputs.kernel_repo != ''
+        env:
+          KREPO: ${{ inputs.kernel_repo }}
+          KBRANCH: ${{ inputs.kernel_branch }}
+        run: |
+          set -euo pipefail
+          rm -rf kernel
+          git clone --depth=1 --branch "$KBRANCH" "$KREPO" kernel
+
+      - name: Inspect kernel source
+        run: |
+          set -euo pipefail
+          cd kernel
+          test -f Makefile || {
+            echo "::error::kernel/Makefile 不存在：如果你用的是独立 builder 仓库，请在触发时填 kernel_repo。"
+            exit 1
+          }
+          if [ ! -f "arch/arm64/configs/$DEFCONFIG_NAME" ] && [ ! -f "arch/arm64/configs/vendor/$DEFCONFIG_NAME" ]; then
+            echo "::error::找不到 defconfig: $DEFCONFIG_NAME"
+            find arch/arm64/configs -name "*_defconfig" | head -n 40
+            exit 1
+          fi
+          KVER=$(awk -F" = " '/^VERSION =/{v=$2}/^PATCHLEVEL =/{p=$2}/^SUBLEVEL =/{s=$2}END{print v"."p"."s}' Makefile)
+          echo "KERNEL_VERSION=$KVER" >> "$GITHUB_ENV"
+          echo "KERNEL_COMMIT=$(git rev-parse --short=8 HEAD)" >> "$GITHUB_ENV"
+          if [ -z "$KERNEL_REPO" ]; then
+            echo "KERNEL_BRANCH=${GITHUB_REF_NAME:-local}" >> "$GITHUB_ENV"
+          fi
+          KSU_GIT=$(awk -F" := " '/^KSU_GIT_VERSION/{print $2; exit}' drivers/kernelsu/Kbuild 2>/dev/null || true)
+          if [[ "${KSU_GIT:-}" =~ ^[0-9]+$ ]]; then
+            echo "KSU_VERSION=$((30000 + KSU_GIT + 150))" >> "$GITHUB_ENV"
+          else
+            echo "KSU_VERSION=unknown" >> "$GITHUB_ENV"
+          fi
+          echo "source : $(git remote get-url origin 2>/dev/null || echo local) @ $(git rev-parse --short=8 HEAD)"
+          echo "version: $KVER"
+          if [ "$KSU_ENABLE" = "true" ] && [ ! -f drivers/kernelsu/Kconfig ]; then
+            echo "::error::该源码树没有内置 KernelSU Next（缺 drivers/kernelsu/Kconfig）。"
+            echo "::error::请使用已集成 KSU-Next + SUSFS 的树（如 SOVIET 16.0-SUSFS / 15-susfs），或把 ksu_enable 设为 false。"
+            exit 1
+          fi
+
+      # ---------------------------------------------------------------- 环境
+      - name: Free disk space
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          docker image prune -af || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl flex git libelf-dev libncurses-dev \
+            libssl-dev unzip zip wget libarchive-tools rsync python3 ca-certificates
+
+      - name: Restore clang r547379 cache
+        id: clang-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.TOOLCHAIN_DIR }}
+          key: clang-r547379-v1
+
+      - name: Download clang r547379
+        if: steps.clang-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$TOOLCHAIN_DIR")"
+          git clone --depth=1 --branch 15.0 \
+            https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_clang-r547379.git \
+            "$TOOLCHAIN_DIR"
+          rm -rf "$TOOLCHAIN_DIR/.git"
+
+      - name: Save clang cache
+        if: steps.clang-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.TOOLCHAIN_DIR }}
+          key: clang-r547379-v1
+
+      - name: Add clang to PATH
+        run: |
+          set -euo pipefail
+          echo "$TOOLCHAIN_DIR/bin" >> "$GITHUB_PATH"
+          "$TOOLCHAIN_DIR/bin/clang" --version | head -n 2
+
+      - name: Set up ccache
+        if: inputs.ccache_enable
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ccache-raphael-${{ env.DEFCONFIG_NAME }}-${{ env.KERNEL_BRANCH }}-${{ github.sha }}
+          restore-keys: |
+            ccache-raphael-${{ env.DEFCONFIG_NAME }}-${{ env.KERNEL_BRANCH }}-
+            ccache-raphael-${{ env.DEFCONFIG_NAME }}-
+          max-size: 2G
+          create-symlink: true
+
+      - name: Select compiler wrapper
+        run: |
+          if [ "$CCACHE_ENABLE" = "true" ]; then
+            echo "CC_VALUE=ccache clang" >> "$GITHUB_ENV"
+          else
+            echo "CC_VALUE=clang" >> "$GITHUB_ENV"
+          fi
+          echo "compiler wrapper: $( [ "$CCACHE_ENABLE" = "true" ] && echo ccache || echo none )"
+
+      # ---------------------------------------------------------------- 补丁
+      - name: Apply local patches (patches/*.patch)
+        if: hashFiles('patches/*.patch', 'kernel/patches/*.patch') != ''
+        run: |
+          set -euo pipefail
+          cd kernel
+          shopt -s nullglob
+          PATCHES=(../patches/*.patch patches/*.patch)
+          [ ${#PATCHES[@]} -gt 0 ] || { echo "没有补丁，跳过"; exit 0; }
+          for p in "${PATCHES[@]}"; do
+            echo "==> applying $p"
+            patch -p1 --forward --batch < "$p"
+          done
+
+      # ---------------------------------------------------------------- 配置
+      - name: Configure kernel (KernelSU Next + SUSFS)
+        run: |
+          set -euo pipefail
+          cd kernel
+          make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 "$DEFCONFIG_NAME"
+
+          if [ "$KSU_ENABLE" = "true" ]; then
+            KCONF=drivers/kernelsu/Kconfig
+            mapfile -t SUSFS_OPTS < <(grep -E "^[[:space:]]*config[[:space:]]+KSU_SUSFS" "$KCONF" | awk '{print $2}')
+            echo "SUSFS options in tree: ${SUSFS_OPTS[*]:-<none>}"
+
+            ./scripts/config --file out/.config -e KSU
+            for opt in "${SUSFS_OPTS[@]}"; do
+              ./scripts/config --file out/.config -e "$opt"
+            done
+
+            case "$HOOK_MODE" in
+              manual)
+                ./scripts/config --file out/.config -e KSU_MANUAL_HOOK
+                ./scripts/config --file out/.config -d KSU_KPROBES_HOOK
+                ;;
+              kprobe)
+                ./scripts/config --file out/.config -d KSU_MANUAL_HOOK
+                ./scripts/config --file out/.config -e KSU_KPROBES_HOOK
+                ;;
+              *)
+                echo "::error::未知 hook_mode: $HOOK_MODE"; exit 1
+                ;;
+            esac
+
+            if [ "$SUSFS_ENABLE" != "true" ]; then
+              ./scripts/config --file out/.config -d KSU_SUSFS
+              for opt in "${SUSFS_OPTS[@]}"; do
+                ./scripts/config --file out/.config -d "$opt"
+              done
+            fi
+          else
+            ./scripts/config --file out/.config -d KSU
+          fi
+
+          if [ -n "$LOCALVERSION_SUFFIX" ]; then
+            ./scripts/config --file out/.config --set-str LOCALVERSION "-${LOCALVERSION_SUFFIX}"
+          fi
+
+          make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 olddefconfig
+
+          echo "---- 关键配置 ----"
+          grep -E "^(CONFIG_KSU|CONFIG_KSU_SUSFS|CONFIG_KSU_MANUAL_HOOK|CONFIG_KSU_KPROBES_HOOK|CONFIG_KPROBES|CONFIG_THREAD_INFO_IN_TASK|CONFIG_LOCALVERSION)=" out/.config || true
+          echo "------------------"
+
+          rc=0
+          if [ "$KSU_ENABLE" = "true" ]; then
+            grep -qx "CONFIG_KSU=y" out/.config || { echo "::error::CONFIG_KSU 没有生效"; rc=1; }
+            if [ "$SUSFS_ENABLE" = "true" ]; then
+              grep -qx "CONFIG_KSU_SUSFS=y" out/.config || {
+                echo "::error::CONFIG_KSU_SUSFS 没有生效：确认 arm64 已 select THREAD_INFO_IN_TASK，且树里有 SUSFS 代码"; rc=1; }
+            fi
+            if [ "$HOOK_MODE" = "manual" ]; then
+              grep -qx "CONFIG_KSU_MANUAL_HOOK=y" out/.config || { echo "::error::CONFIG_KSU_MANUAL_HOOK 没有生效"; rc=1; }
+            fi
+          fi
+          exit $rc
+
+      # ---------------------------------------------------------------- 编译
+      - name: Build kernel
+        run: |
+          set -euo pipefail
+          cd kernel
+          echo "CC=$CC_VALUE  JOBS=$(nproc)  VERSION=$KERNEL_VERSION"
+          make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 CC="$CC_VALUE" -j"$(nproc)"
+          echo "KERNEL_RELEASE=$(cat out/include/config/kernel.release 2>/dev/null || echo unknown)" >> "$GITHUB_ENV"
+
+      - name: ccache statistics
+        if: always() && inputs.ccache_enable
+        run: |
+          ccache --show-stats --verbose || ccache --show-stats || true
+
+      # ---------------------------------------------------------------- 打包
+      - name: Package AnyKernel3 zip
+        id: package
+        run: |
+          set -euo pipefail
+          IMG=kernel/out/arch/arm64/boot
+          test -f "$IMG/Image.gz-dtb" || { echo "::error::缺少 Image.gz-dtb"; ls -l "$IMG"; exit 1; }
+          test -f "$IMG/dtbo.img"    || { echo "::error::缺少 dtbo.img"; exit 1; }
+
+          git clone --depth=1 https://github.com/SOVIET-ANDROID/AnyKernel3.git ak3
+          rm -rf ak3/.git
+          cp -f "$IMG/Image.gz-dtb" "$IMG/dtbo.img" ak3/
+
+          NAME="raphael-${KERNEL_BRANCH}-${KERNEL_VERSION}-${KERNEL_COMMIT}-$(date -u +%Y%m%d-%H%M)"
+          ( cd ak3 && zip -r9 "../${NAME}.zip" * )
+          echo "ZIP_NAME=${NAME}.zip" >> "$GITHUB_OUTPUT"
+          ls -lh "${NAME}.zip"
+          unzip -l "${NAME}.zip" | tail -n 12
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.ZIP_NAME }}
+          path: ${{ steps.package.outputs.ZIP_NAME }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Publish GitHub Release
+        if: inputs.release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag || format('raphael-{0}', github.run_number) }}
+          name: ${{ steps.package.outputs.ZIP_NAME }}
+          files: ${{ steps.package.outputs.ZIP_NAME }}
+          generate_release_notes: true
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## raphael kernel build"
+            echo ""
+            echo "| item | value |"
+            echo "|---|---|"
+            echo "| kernel | $KERNEL_VERSION ($KERNEL_COMMIT) |"
+            echo "| release | $KERNEL_RELEASE |"
+            echo "| branch | $KERNEL_BRANCH |"
+            echo "| defconfig | $DEFCONFIG_NAME |"
+            echo "| KSU / SUSFS | $KSU_ENABLE / $SUSFS_ENABLE (hook: $HOOK_MODE) |"
+            echo "| ccache | $CCACHE_ENABLE |"
+            echo "| artifact | ${{ steps.package.outputs.ZIP_NAME }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$CCACHE_ENABLE" = "true" ]; then
+            { echo ""; echo "<details><summary>ccache stats</summary>"; echo ""; echo "```"; ccache --show-stats || true; echo "```"; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
+          fi
