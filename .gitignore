@@ -1,0 +1,4 @@
+dist/
+donor/
+donors/boot.img
+tools/__pycache__/
