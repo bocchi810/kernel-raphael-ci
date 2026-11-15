@@ -113,6 +113,18 @@ fastboot flash dtbo dtbo.img
 fastboot reboot
 ```
 
+**小米 4.14 机型的 kernel 容器格式（重要）**：
+
+raphael 的 MIUI boot.img 里 kernel 不是原样的 `Image.gz-dtb`，而是小米的 `UNCOMPRESSED_IMG` 容器：
+
+```
+16 字节 "UNCOMPRESSED_IMG" | u32 LE（Image 长度）| 未压缩 Image | dtb
+```
+
+实测 MIUI 12.5.6.0.RFKCNXM 的 boot.img：header v1、**ramdisk size = 0**（system-as-root）、kernel chunk 43,958,745 字节，其中 Image 41,963,536 + dtb 1,995,189。
+
+流水线会自动识别：底包是这种容器就把 `Image.gz-dtb` 解压成 Image、拼回同格式的容器；不是就原样塞进去。重打包后会再解包断言 `kernel_size` 等于我们的内核大小，防止「内核根本没换进去」（这个 bug 真实踩过一次：取 mkbootimg 参数的那次 unpack 会把刚写进去的内核覆盖回底包的）。
+
 **注意**：
 
 - 重打包出来的 boot.img **没有 AVB 签名**。设备若在 `fastboot flash` 后校验失败不开机，用你 ROM 里的 vbmeta 关一次校验：`fastboot --disable-verity --disable-verification flash vbmeta vbmeta.img`（这一步只需一次）。

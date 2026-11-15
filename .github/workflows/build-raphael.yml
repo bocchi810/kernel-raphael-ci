@@ -370,17 +370,46 @@ jobs:
           WORK="$RUNNER_TEMP/bootrepack"
           rm -rf "$WORK" && mkdir -p "$WORK" && cd "$WORK"
           python3 "$GITHUB_WORKSPACE/tools/mkbootimg/unpack_bootimg.py" --boot_img "$GITHUB_WORKSPACE/$DONOR" --out unpacked
-          cp "$GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image.gz-dtb" unpacked/kernel
-          K_MAGIC=$(head -c 2 unpacked/kernel | od -An -tx1 | tr -d " \n")
-          B_MAGIC=$(head -c 2 "$GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image.gz-dtb" | od -An -tx1 | tr -d " \n")
-          if [ "$K_MAGIC" != "$B_MAGIC" ]; then
-            echo "::error::内核压缩格式与底包不一致 donor=$K_MAGIC build=$B_MAGIC"
-            exit 1
-          fi
+          # 先把 mkbootimg 参数取出来；注意这一步会重新解包到 unpacked/，必须在替换内核之前做
           ARGS=$(python3 "$GITHUB_WORKSPACE/tools/mkbootimg/unpack_bootimg.py" --boot_img "$GITHUB_WORKSPACE/$DONOR" --out unpacked --format=mkbootimg)
+          KERNEL="$GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image.gz-dtb"
+          DK_MAGIC=$(head -c 16 unpacked/kernel)
+          if [ "$DK_MAGIC" = "UNCOMPRESSED_IMG" ]; then
+            echo "底包是小米 UNCOMPRESSED_IMG 容器（Image 不压缩 + 长度 + dtb），按同格式重打包"
+            python3 - "$KERNEL" unpacked/kernel <<'PY'
+          import sys, zlib, struct
+          src, dst = sys.argv[1], sys.argv[2]
+          d = zlib.decompressobj(31)
+          image = d.decompress(open(src, "rb").read())
+          dtb = d.unused_data
+          if not image:
+              sys.exit("gunzip failed: " + src)
+          with open(dst, "wb") as f:
+              f.write(b"UNCOMPRESSED_IMG")
+              f.write(struct.pack("<I", len(image)))
+              f.write(image)
+              f.write(dtb)
+          print("uncompressed image", len(image), "dtb", len(dtb))
+          PY
+          else
+            cp "$KERNEL" unpacked/kernel
+            K_MAGIC=$(head -c 2 unpacked/kernel | od -An -tx1 | tr -d " \n")
+            B_MAGIC=$(head -c 2 "$KERNEL" | od -An -tx1 | tr -d " \n")
+            if [ "$K_MAGIC" != "$B_MAGIC" ]; then
+              echo "::error::内核压缩格式与底包不一致 donor=$K_MAGIC build=$B_MAGIC"
+              exit 1
+            fi
+          fi
           OUT="$GITHUB_WORKSPACE/dist/boot-${KERNEL_VERSION}-${KERNEL_COMMIT}-$(date -u +%Y%m%d-%H%M).img"
           eval "python3 \"$GITHUB_WORKSPACE/tools/mkbootimg/mkbootimg.py\" $ARGS -o \"$OUT\""
-          python3 "$GITHUB_WORKSPACE/tools/mkbootimg/unpack_bootimg.py" --boot_img "$OUT" --out verify | head -n 20
+          VERIFY=$(python3 "$GITHUB_WORKSPACE/tools/mkbootimg/unpack_bootimg.py" --boot_img "$OUT" --out verify)
+          echo "$VERIFY" | head -n 20
+          GOT=$(echo "$VERIFY" | awk '/^kernel_size:/ {print $2}')
+          WANT=$(stat -c %s unpacked/kernel)
+          if [ "$GOT" != "$WANT" ]; then
+            echo "::error::重打包后 kernel_size=$GOT，期望 $WANT —— 内核没有被替换进去"
+            exit 1
+          fi
           echo "BOOT_IMG=$(basename "$OUT")" >> "$GITHUB_ENV"
           ls -lh "$OUT"
 
