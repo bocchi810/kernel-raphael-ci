@@ -67,8 +67,8 @@ git push -u origin main
 | `susfs_enable` | `true` | 关掉则 `CONFIG_KSU_SUSFS*` 全部置 n |
 | `hook_mode` | `manual` | **4.14 必须 manual**；`kprobe` 只给 5.10+ 的树用 |
 | `ccache_enable` | `true` | 关掉后直接用 clang，不挂 ccache |
-| `release` | `false` | 构建成功后发 GitHub Release（需要 `contents: write`，workflow 里已声明） |
-| `release_tag` | 空 | 留空自动用 `raphael-<run_number>` |
+| `release` | `false` | 构建成功后发 GitHub Release（tag 自动用 `raphael-<run_number>`；需要 `contents: write`，workflow 里已声明） |
+| `boot_img_url` | 空 | 你 ROM 里 `boot.img` 的直链；给了就额外产出可 `fastboot` 刷的 `boot-*.img`（见 4.5） |
 
 另外：仓库根目录或 `kernel/` 下若有 `patches/*.patch`，会在编译前按文件名顺序 `patch -p1` 打进源码。
 
@@ -79,6 +79,45 @@ git push -u origin main
 - 稳定性设置：`CCACHE_COMPILERCHECK=string:clang-r547379`、`CCACHE_NOHASHDIR=true`、`CCACHE_HARDLINK=true`。
 - 上游同一套配置的实测：`SOVIET-ANDROID/kernel_xiaomi_raphael` 的 CI job 稳定在 15–16 分钟（ccache 持续命中）；空缓存首次大约 45–70 分钟。
 - 换 defconfig / 换分支 / 升级内核大版本后，建议在 Actions → Caches 里删掉 `ccache-raphael-*` 再跑，避免失效对象占额度。
+
+## 4.5 boot.img：额外产出一个可 fastboot 刷的内核镜像
+
+AK3 zip 只能在 recovery 里刷。要用 fastboot 直接刷，就得有 **boot.img**——而 boot.img 不可能凭空生成：
+
+| 组成 | 来源 |
+|---|---|
+| kernel | 本次编译的 `Image.gz-dtb` |
+| ramdisk | **你 ROM 的 boot.img**（里面是 init、fstab、vendor 相关的第一段用户态） |
+| cmdline / 偏移 / dtb / header 版本 | **你 ROM 的 boot.img** 的 boot header |
+
+所以流水线做的是「用你的 boot.img 当底包，只把 kernel 换掉再重打包」，ramdisk 和 cmdline 一个字节都不动。
+
+**给底包的方式（二选一）**：
+
+1. 触发时填 `boot_img_url`：你 ROM zip 里那个 `boot.img` 的直链（GitHub Release / 网盘直链都行，要能 `curl -L` 下）。
+2. 把文件放到仓库的 `donors/boot.img` 提交进去（workflow 会自动用）。
+
+两个都没给时这一步整体跳过，只出 AK3 zip。
+
+**产物**：上传的 artifact 是一个 `dist/` 目录，里面
+
+- `raphael-<branch>-<ver>-<commit>-<time>.zip` —— AnyKernel3 包（recovery 刷）
+- `boot-<ver>-<commit>-<time>.img` —— 可 fastboot 刷的 boot.img（只有给了底包才有）
+
+**刷写**（raphael 是 A-only，没有 `_a`/`_b` 槽位后缀）：
+
+```bash
+fastboot flash boot boot-4.14.357-xxxx-20261115-2140.img
+# 需要换 dtbo（比如新内核配了新的 dts）时，dtbo 不在这张 boot.img 里：
+fastboot flash dtbo dtbo.img
+fastboot reboot
+```
+
+**注意**：
+
+- 重打包出来的 boot.img **没有 AVB 签名**。设备若在 `fastboot flash` 后校验失败不开机，用你 ROM 里的 vbmeta 关一次校验：`fastboot --disable-verity --disable-verification flash vbmeta vbmeta.img`（这一步只需一次）。
+- 底包必须和你要刷的 ROM 是同一版本，换了 ROM 就要换底包重打包，否则 ramdisk 与系统不对应。
+- 有自定义 recovery 时，AK3 zip 更省事（它还会顺带处理 dtbo）；boot.img 是给「只有 fastboot」的场景用的。
 
 ## 5. 为什么 4.14 必须用 manual hook
 

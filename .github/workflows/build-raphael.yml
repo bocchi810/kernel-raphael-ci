@@ -50,8 +50,8 @@ on:
         description: "构建成功后发布 GitHub Release"
         type: boolean
         default: false
-      release_tag:
-        description: "Release tag（留空=raphael-<run_number>）"
+      boot_img_url:
+        description: "可选：你 ROM 里 boot.img 的直链，给了就额外产出 boot.img（内核+你的 ramdisk 重打包）"
         required: false
         default: ""
 
@@ -312,15 +312,64 @@ jobs:
 
           NAME="raphael-${KERNEL_BRANCH}-${KERNEL_VERSION}-${KERNEL_COMMIT}-$(date -u +%Y%m%d-%H%M)"
           ( cd ak3 && zip -r9 "../${NAME}.zip" * )
+          mkdir -p dist && cp -f "${NAME}.zip" dist/
           echo "ZIP_NAME=${NAME}.zip" >> "$GITHUB_OUTPUT"
-          ls -lh "${NAME}.zip"
-          unzip -l "${NAME}.zip" | tail -n 12
+          ls -lh "dist/${NAME}.zip"
+          unzip -l "dist/${NAME}.zip" | tail -n 12
+
+      # ---------------------------------------------------------------- boot.img
+      # 内核本身不能凭空变成可刷 boot.img：必须拿你 ROM 的 boot.img 当底包（ramdisk/cmdline/偏移都沿用它的），
+      # 只把里面的 kernel 换成本次编译产物。底包来源：仓库 donors/boot.img，或输入 boot_img_url。
+      - name: Prepare donor boot.img
+        id: donor
+        if: inputs.boot_img_url != '' || hashFiles('donors/boot.img') != ''
+        env:
+          BOOT_IMG_URL: ${{ inputs.boot_img_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p donor
+          if [ -n "$BOOT_IMG_URL" ]; then
+            curl -fL --retry 3 --max-time 900 -o donor/boot.img "$BOOT_IMG_URL"
+          else
+            cp donors/boot.img donor/boot.img
+          fi
+          test -s donor/boot.img
+          MAGIC=$(head -c 8 donor/boot.img)
+          if [ "$MAGIC" != "ANDROID!" ]; then
+            echo "::error::donor/boot.img 不是 Android boot image（magic=$MAGIC）"
+            exit 1
+          fi
+          ls -lh donor/boot.img
+          echo "DONOR=donor/boot.img" >> "$GITHUB_ENV"
+          echo "donor=1" >> "$GITHUB_OUTPUT"
+
+      - name: Repack boot.img with built kernel
+        if: steps.donor.outputs.donor == '1'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          WORK="$RUNNER_TEMP/bootrepack"
+          rm -rf "$WORK" && mkdir -p "$WORK" && cd "$WORK"
+          python3 "$GITHUB_WORKSPACE/tools/mkbootimg/unpack_bootimg.py" --boot_img "$GITHUB_WORKSPACE/$DONOR" --out unpacked
+          cp "$GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image.gz-dtb" unpacked/kernel
+          K_MAGIC=$(head -c 2 unpacked/kernel | od -An -tx1 | tr -d " \n")
+          B_MAGIC=$(head -c 2 "$GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image.gz-dtb" | od -An -tx1 | tr -d " \n")
+          if [ "$K_MAGIC" != "$B_MAGIC" ]; then
+            echo "::error::内核压缩格式与底包不一致 donor=$K_MAGIC build=$B_MAGIC"
+            exit 1
+          fi
+          ARGS=$(python3 "$GITHUB_WORKSPACE/tools/mkbootimg/unpack_bootimg.py" --boot_img "$GITHUB_WORKSPACE/$DONOR" --out unpacked --format=mkbootimg)
+          OUT="$GITHUB_WORKSPACE/dist/boot-${KERNEL_VERSION}-${KERNEL_COMMIT}-$(date -u +%Y%m%d-%H%M).img"
+          eval "python3 \"$GITHUB_WORKSPACE/tools/mkbootimg/mkbootimg.py\" $ARGS -o \"$OUT\""
+          python3 "$GITHUB_WORKSPACE/tools/mkbootimg/unpack_bootimg.py" --boot_img "$OUT" --out verify | head -n 20
+          echo "BOOT_IMG=$(basename "$OUT")" >> "$GITHUB_ENV"
+          ls -lh "$OUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.package.outputs.ZIP_NAME }}
-          path: ${{ steps.package.outputs.ZIP_NAME }}
+          path: dist/
           if-no-files-found: error
           retention-days: 7
 
@@ -328,7 +377,7 @@ jobs:
         if: inputs.release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag || format('raphael-{0}', github.run_number) }}
+          tag_name: ${{ format('raphael-{0}', github.run_number) }}
           name: ${{ steps.package.outputs.ZIP_NAME }}
           files: ${{ steps.package.outputs.ZIP_NAME }}
           generate_release_notes: true
@@ -347,7 +396,8 @@ jobs:
             echo "| defconfig | $DEFCONFIG_NAME |"
             echo "| KSU / SUSFS | $KSU_ENABLE / $SUSFS_ENABLE (hook: $HOOK_MODE) |"
             echo "| ccache | $CCACHE_ENABLE |"
-            echo "| artifact | ${{ steps.package.outputs.ZIP_NAME }} |"
+            echo "| AK3 zip | ${{ steps.package.outputs.ZIP_NAME }} |"
+            echo "| boot.img | ${BOOT_IMG:-未产出（没给 donor）} |"
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$CCACHE_ENABLE" = "true" ]; then
             { echo ""; echo "<details><summary>ccache stats</summary>"; echo ""; echo "```"; ccache --show-stats || true; echo "```"; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
