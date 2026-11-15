@@ -51,7 +51,7 @@ on:
         type: boolean
         default: false
       boot_img_url:
-        description: "可选：你 ROM 里 boot.img 的直链，给了就额外产出 boot.img（内核+你的 ramdisk 重打包）"
+        description: "可选：你 ROM 的 boot.img 直链（也接受 ROM zip 直链，会自动取里面的 boot.img）"
         required: false
         default: ""
 
@@ -329,16 +329,35 @@ jobs:
           set -euo pipefail
           mkdir -p donor
           if [ -n "$BOOT_IMG_URL" ]; then
-            curl -fL --retry 3 --max-time 900 -o donor/boot.img "$BOOT_IMG_URL"
+            curl -fL --retry 3 --max-time 900 -o donor/download "$BOOT_IMG_URL"
           else
-            cp donors/boot.img donor/boot.img
+            cp donors/boot.img donor/download
           fi
-          test -s donor/boot.img
-          MAGIC=$(head -c 8 donor/boot.img)
-          if [ "$MAGIC" != "ANDROID!" ]; then
-            echo "::error::donor/boot.img 不是 Android boot image（magic=$MAGIC）"
+          SRC=donor/download
+          # 直接给 ROM zip 也认：从根目录取 boot.img
+          if [ "$(head -c 2 "$SRC")" = "PK" ]; then
+            echo "输入是 zip 包，从里面取 boot.img"
+            SRC=$(python3 - "$SRC" <<'PY'
+          import sys, zipfile, os
+          src = sys.argv[1]
+          with zipfile.ZipFile(src) as z:
+              names = [n for n in z.namelist() if os.path.basename(n) == "boot.img"]
+              if not names:
+                  sys.exit(1)
+              names.sort(key=lambda n: n.count("/"))
+              os.makedirs("donor/extract", exist_ok=True)
+              out = os.path.join("donor/extract", "boot.img")
+              with z.open(names[0]) as f, open(out, "wb") as g:
+                  g.write(f.read())
+              print(out)
+          PY
+            ) || true
+          fi
+          if [ ! -s "$SRC" ] || [ "$(head -c 8 "$SRC")" != "ANDROID!" ]; then
+            echo "::error::底包里取不到 boot.img（或者不是 Android boot image）：$SRC"
             exit 1
           fi
+          mv "$SRC" donor/boot.img
           ls -lh donor/boot.img
           echo "DONOR=donor/boot.img" >> "$GITHUB_ENV"
           echo "donor=1" >> "$GITHUB_OUTPUT"

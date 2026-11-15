@@ -94,7 +94,7 @@ AK3 zip 只能在 recovery 里刷。要用 fastboot 直接刷，就得有 **boot
 
 **给底包的方式（二选一）**：
 
-1. 触发时填 `boot_img_url`：你 ROM zip 里那个 `boot.img` 的直链（GitHub Release / 网盘直链都行，要能 `curl -L` 下）。
+1. 触发时填 `boot_img_url`：你 ROM zip 里那个 `boot.img` 的直链，**或者直接给 ROM zip 的直链**（会自动从包里取出 `boot.img`）。GitHub Release / 网盘直链都行，要能 `curl -L` 下。
 2. 把文件放到仓库的 `donors/boot.img` 提交进去（workflow 会自动用）。
 
 两个都没给时这一步整体跳过，只出 AK3 zip。
