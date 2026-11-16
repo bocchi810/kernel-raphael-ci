@@ -132,7 +132,14 @@ jobs:
           git clone --depth 1 -b "$KSU_REF" "$KSU_SRC" "$RUNNER_TEMP/ksu" >/dev/null 2>&1
           rm -rf drivers/kernelsu
           cp -r "$RUNNER_TEMP/ksu/kernel" drivers/kernelsu
+          # repo 里 kernel/include/uapi 是指向 <repo>/uapi 的相对软链，只拷 kernel/ 会变成悬空
+          if [ -L drivers/kernelsu/include/uapi ] || [ ! -e drivers/kernelsu/include/uapi ]; then
+            rm -f drivers/kernelsu/include/uapi
+            cp -r "$RUNNER_TEMP/ksu/uapi" drivers/kernelsu/include/uapi
+            cp -r "$RUNNER_TEMP/ksu/uapi" drivers/kernelsu/uapi
+          fi
           test -f drivers/kernelsu/Kconfig
+          test -f drivers/kernelsu/include/uapi/app_profile.h
           if ! grep -rq susfs_is_current_ksu_domain drivers/kernelsu; then
             echo "add SUSFS selinux glue to the driver"
             cat >> drivers/kernelsu/selinux/selinux.c <<'EOF'
@@ -257,7 +264,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             bc bison build-essential ccache curl flex git libelf-dev libncurses-dev \
-            libssl-dev unzip zip wget libarchive-tools rsync python3 ca-certificates
+            libssl-dev unzip zip wget libarchive-tools rsync python3 ca-certificates device-tree-compiler
 
       # CONFIG_COMPAT_VDSO=y 时 arm64 的 Makefile 强制要求 CROSS_COMPILE_ARM32，
       # 否则直接 `*** CROSS_COMPILE_ARM32 not defined or empty` 退出（4.14 arch/arm64/Makefile:75）
@@ -427,7 +434,8 @@ jobs:
           set -euo pipefail
           cd kernel
           echo "CC=$CC_VALUE  JOBS=$(nproc)  VERSION=$KERNEL_VERSION"
-          make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 CC="$CC_VALUE" KCFLAGS="$EXTRA_KCFLAGS" -j"$(nproc)"
+          # 树内自带的 dtc 是 1.4.4，解析不了 QCOM overlay 里的 &label 片段（raphael-pinctrl.dtsi:2 直接 syntax error）
+          make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 CC="$CC_VALUE" KCFLAGS="$EXTRA_KCFLAGS" DTC=/usr/bin/dtc -j"$(nproc)"
           echo "KERNEL_RELEASE=$(cat out/include/config/kernel.release 2>/dev/null || echo unknown)" >> "$GITHUB_ENV"
 
       - name: ccache statistics
