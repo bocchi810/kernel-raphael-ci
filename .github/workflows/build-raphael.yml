@@ -104,6 +104,14 @@ jobs:
           rm -rf kernel
           git clone --depth=1 --branch "$KBRANCH" "$KREPO" kernel
 
+      - name: Checkout (builder tools)
+        if: inputs.kernel_repo != ''
+        uses: actions/checkout@v4
+        with:
+          path: builder
+          fetch-depth: 1
+          sparse-checkout: tools
+
       - name: Inspect kernel source
         run: |
           set -euo pipefail
@@ -369,9 +377,16 @@ jobs:
           mkdir -p dist
           WORK="$RUNNER_TEMP/bootrepack"
           rm -rf "$WORK" && mkdir -p "$WORK" && cd "$WORK"
-          python3 "$GITHUB_WORKSPACE/tools/mkbootimg/unpack_bootimg.py" --boot_img "$GITHUB_WORKSPACE/$DONOR" --out unpacked
+          # 用外部内核源时，本仓库自己的 tools/ 已经被 rm -rf kernel 删掉，改从 builder/ 里取
+          MKTOOLS=""
+          for d in "$GITHUB_WORKSPACE/builder/tools/mkbootimg" "$GITHUB_WORKSPACE/kernel/tools/mkbootimg" "$GITHUB_WORKSPACE/tools/mkbootimg"; do
+            if [ -f "$d/mkbootimg.py" ]; then MKTOOLS="$d"; break; fi
+          done
+          [ -n "$MKTOOLS" ] || { echo "::error::找不到 tools/mkbootimg（builder 仓库里应该有）"; exit 1; }
+          echo "boot tools: $MKTOOLS"
+          python3 "$MKTOOLS/unpack_bootimg.py" --boot_img "$GITHUB_WORKSPACE/$DONOR" --out unpacked
           # 先把 mkbootimg 参数取出来；注意这一步会重新解包到 unpacked/，必须在替换内核之前做
-          ARGS=$(python3 "$GITHUB_WORKSPACE/tools/mkbootimg/unpack_bootimg.py" --boot_img "$GITHUB_WORKSPACE/$DONOR" --out unpacked --format=mkbootimg)
+          ARGS=$(python3 "$MKTOOLS/unpack_bootimg.py" --boot_img "$GITHUB_WORKSPACE/$DONOR" --out unpacked --format=mkbootimg)
           KERNEL="$GITHUB_WORKSPACE/kernel/out/arch/arm64/boot/Image.gz-dtb"
           DK_MAGIC=$(head -c 16 unpacked/kernel)
           if [ "$DK_MAGIC" = "UNCOMPRESSED_IMG" ]; then
@@ -401,8 +416,8 @@ jobs:
             fi
           fi
           OUT="$GITHUB_WORKSPACE/dist/boot-${KERNEL_VERSION}-${KERNEL_COMMIT}-$(date -u +%Y%m%d-%H%M).img"
-          eval "python3 \"$GITHUB_WORKSPACE/tools/mkbootimg/mkbootimg.py\" $ARGS -o \"$OUT\""
-          VERIFY=$(python3 "$GITHUB_WORKSPACE/tools/mkbootimg/unpack_bootimg.py" --boot_img "$OUT" --out verify)
+          eval "python3 \"$MKTOOLS/mkbootimg.py\" $ARGS -o \"$OUT\""
+          VERIFY=$(python3 "$MKTOOLS/unpack_bootimg.py" --boot_img "$OUT" --out verify)
           echo "$VERIFY" | head -n 20
           GOT=$(echo "$VERIFY" | awk '/^kernel_size:/ {print $2}')
           WANT=$(stat -c %s unpacked/kernel)
