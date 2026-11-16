@@ -144,6 +144,68 @@ jobs:
           }
           EOF
           fi
+          # SUSFS 的 Kconfig 选项在 KSU Next 上游里没有（ReSukiSU 才有），补一份，否则 scripts/config -e 会被 olddefconfig 丢掉
+          if ! grep -q "config KSU_SUSFS$" drivers/kernelsu/Kconfig; then
+            cat >> drivers/kernelsu/Kconfig <<'EOF'
+          
+          menu "KernelSU - SUSFS"
+          
+          config KSU_SUSFS
+          	bool "KernelSU addon - SUSFS"
+          	depends on KSU
+          	default y
+          	help
+          	  SUSFS (SU Hide File System) kernel-side implementation.
+          
+          config KSU_SUSFS_SUS_PATH
+          	bool "Hide suspicious paths"
+          	depends on KSU_SUSFS
+          	default y
+          
+          config KSU_SUSFS_SUS_MOUNT
+          	bool "Hide suspicious mounts"
+          	depends on KSU_SUSFS
+          	default y
+          
+          config KSU_SUSFS_SUS_KSTAT
+          	bool "Hide or spoof kstat"
+          	depends on KSU_SUSFS
+          	default y
+          
+          config KSU_SUSFS_SPOOF_UNAME
+          	bool "Spoof uname"
+          	depends on KSU_SUSFS
+          	default y
+          
+          config KSU_SUSFS_ENABLE_LOG
+          	bool "Enable SUSFS logs"
+          	depends on KSU_SUSFS
+          	default y
+          
+          config KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+          	bool "Hide KernelSU and SUSFS symbols"
+          	depends on KSU_SUSFS
+          	default y
+          
+          config KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+          	bool "Spoof cmdline or bootconfig"
+          	depends on KSU_SUSFS
+          	default y
+          
+          config KSU_SUSFS_OPEN_REDIRECT
+          	bool "Enable open redirect"
+          	depends on KSU_SUSFS
+          	default y
+          
+          config KSU_SUSFS_SUS_MAP
+          	bool "Enable sus map"
+          	depends on KSU_SUSFS
+          	default y
+          
+          endmenu
+          EOF
+          fi
+          grep -c "config KSU_SUSFS" drivers/kernelsu/Kconfig
           grep -rn susfs_is_current_ksu_domain drivers/kernelsu | head -3
           ls drivers/kernelsu
 
