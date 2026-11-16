@@ -1,0 +1,217 @@
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -24,13 +24,6 @@
+ #include <linux/susfs_def.h>
+ #include "mount.h"
+ #endif
+-#ifdef CONFIG_KSU_SUSFS
+-extern struct static_key_true ksu_is_init_rc_hook_enabled;
+-extern void ksu_handle_vfs_fstat(int fd, loff_t *kstat_size_ptr);
+-extern struct static_key_true ksu_su_compat_enabled;
+-extern bool __ksu_is_allow_uid_for_current(uid_t uid);
+-extern int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);
+-#endif // #ifdef CONFIG_KSU_SUSFS
+ 
+ /**
+  * generic_fillattr - Fill in the basic attributes from the inode struct
+@@ -170,10 +163,6 @@
+ 	if (f.file) {
+ 		error = vfs_getattr(&f.file->f_path, stat,
+ 				    request_mask, query_flags);
+-#ifdef CONFIG_KSU_SUSFS
+-		if (static_branch_unlikely(&ksu_is_init_rc_hook_enabled))
+-			ksu_handle_vfs_fstat(fd, &stat->size);
+-#endif // #ifdef CONFIG_KSU_SUSFS
+ 
+ 		fdput(f);
+ 	}
+@@ -233,10 +222,6 @@
+ 	if (likely(susfs_is_current_proc_no_su()))
+ 		goto orig_flow;
+ 
+-	if (static_branch_likely(&ksu_su_compat_enabled)) {
+-		if (unlikely(__ksu_is_allow_uid_for_current(current_uid().val)))
+-			ksu_handle_stat(&dfd, &fname, &flags);
+-	}
+ 
+ orig_flow:
+ 	error = filename_lookup(dfd, fname, lookup_flags, &path, NULL);
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -365,8 +365,6 @@
+ #ifdef CONFIG_KSU_SUSFS
+ extern struct static_key_true ksu_su_compat_enabled;
+ extern bool __ksu_is_allow_uid_for_current(uid_t uid);
+-extern int ksu_handle_faccessat(int *dfd, struct filename **filename, int *mode,
+-             int *flags);
+ extern int filename_lookup(int dfd, struct filename *name, unsigned flags,
+ 				struct path *path, struct path *root);
+ #endif
+@@ -437,10 +435,6 @@
+ 	if (likely(susfs_is_current_proc_no_su()))
+ 		goto orig_flow;
+ 
+-	if (static_branch_likely(&ksu_su_compat_enabled)) {
+-		if (unlikely(__ksu_is_allow_uid_for_current(current_uid().val)))
+-			ksu_handle_faccessat(&dfd, &fname, &mode, NULL);
+-	}
+ 
+ orig_flow:
+ 	res = filename_lookup(dfd, fname, lookup_flags, &path, NULL);
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1696,17 +1696,6 @@
+ /*
+  * sys_execve() executes a new program.
+  */
+-#ifdef CONFIG_KSU_SUSFS
+-extern struct static_key_true ksu_su_compat_enabled;
+-extern struct static_key_true susfs_is_sdcard_android_data_not_decrypted;
+-extern bool __ksu_is_allow_uid_for_current(uid_t uid);
+-extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr, void *argv,
+-			void *envp, int *flags);
+-extern int ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
+-				 void *argv, void *envp, int *flags);
+-extern int ksu_handle_post_execveat_sucompat(int *fd, struct filename **filename_ptr, void *argv,
+-			void *envp, int *flags, int *retval);
+-#endif
+ 
+ static int do_execveat_common(int fd, struct filename *filename,
+ 			      struct user_arg_ptr argv,
+@@ -1725,23 +1714,9 @@
+ 	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+ #endif
+ 
+-#ifdef CONFIG_KSU_SUSFS
+-	bool is_su_session = false;
+-#endif // #ifdef CONFIG_KSU_SUSFS
+ 
+ 	if (IS_ERR(filename))
+ 		return PTR_ERR(filename);
+-#ifdef CONFIG_KSU_SUSFS
+-	if (likely(susfs_is_current_proc_no_su()))
+-		goto orig_flow;
+-	if (static_branch_likely(&ksu_su_compat_enabled)) {
+-		if (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted))
+-		is_su_session = !ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
+-	else
+-		is_su_session = !ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
+-	}
+-orig_flow:
+-#endif
+ 
+ 	/*
+ 	 * We move the actual failure in case of RLIMIT_NPROC excess from
+@@ -1862,10 +1837,6 @@
+ 	current->fs->in_exec = 0;
+ 	current->in_execve = 0;
+ 
+-#ifdef CONFIG_KSU_SUSFS
+-	if (unlikely(is_su_session))
+-		(void)ksu_handle_post_execveat_sucompat(&fd, &filename, &argv, &envp, &flags, &retval);
+-#endif // #ifdef CONFIG_KSU_SUSFS
+ 
+ out_free:
+ 	free_bprm(bprm);
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -569,8 +569,7 @@
+ }
+ 
+ #ifdef CONFIG_KSU
+-extern struct static_key_true ksu_is_init_rc_hook_enabled;
+-extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd);
++extern void ksu_handle_sys_read(unsigned int fd);
+ #endif
+ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+ {
+@@ -579,11 +578,6 @@
+ 
+ 	
+ #ifdef CONFIG_KSU
+-	if (static_branch_unlikely(&ksu_is_init_rc_hook_enabled))
+-		ksu_handle_sys_read(fd);
+-#endif
+-#ifdef CONFIG_KSU
+-	extern void ksu_handle_sys_read(unsigned int fd);
+ 	ksu_handle_sys_read(fd);
+ #endif
+ 
+--- a/kernel/sys.c
++++ b/kernel/sys.c
+@@ -596,7 +596,7 @@
+  * and suid.  This allows you to implement the 4.4 compatible seteuid().
+  */
+ #ifdef CONFIG_KSU
+-extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
++extern int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid);
+ #endif
+ 
+ SYSCALL_DEFINE3(setresuid, uid_t, ruid, uid_t, euid, uid_t, suid)
+@@ -608,19 +608,14 @@
+ 	kuid_t kruid, keuid, ksuid;
+ 
+ #ifdef CONFIG_KSU
+-	extern int ksu_handle_setresuid(uid_t ruid, uid_t euid, uid_t suid);
+-	ksu_handle_setresuid(ruid, euid, suid);
++	extern int ksu_handle_setresuid(uid_t old_uid, uid_t new_uid);
++	ksu_handle_setresuid(ruid, euid);
+ #endif
+ 
+ 	kruid = make_kuid(ns, ruid);
+ 	keuid = make_kuid(ns, euid);
+ 	ksuid = make_kuid(ns, suid);
+ 
+-#ifdef CONFIG_KSU_SUSFS
+-	if (ksu_handle_setresuid(ruid, euid, suid)) {
+-		pr_info("Something wrong with ksu_handle_setresuid()\\n");
+-	}
+-#endif
+ 	if ((ruid != (uid_t) -1) && !uid_valid(kruid))
+ 		return -EINVAL;
+ 
+--- a/kernel/reboot.c
++++ b/kernel/reboot.c
+@@ -277,9 +277,6 @@
+  *
+  * reboot doesn't sync: do that yourself before calling this.
+  */
+-#ifdef CONFIG_KSU_SUSFS
+-extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
+-#endif
+ 
+ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+ 		void __user *, arg)
+@@ -287,11 +284,6 @@
+ 	struct pid_namespace *pid_ns = task_active_pid_ns(current);
+ 	char buffer[256];
+ 	int ret = 0;
+-#ifdef CONFIG_KSU_SUSFS
+-    if (system_state == SYSTEM_RUNNING) {
+-        ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
+-    }
+-#endif
+ 
+ 
+ #ifdef CONFIG_KSU
+--- a/drivers/input/input.c
++++ b/drivers/input/input.c
+@@ -367,7 +367,6 @@
+ }
+ 
+ #ifdef CONFIG_KSU
+-extern struct static_key_true ksu_is_input_hook_enabled;
+ extern int ksu_handle_input_handle_event(unsigned int *type, unsigned int *code, int *value);
+ #endif
+ 
+@@ -375,10 +374,6 @@
+ 			       unsigned int type, unsigned int code, int value)
+ {
+ 	int disposition = input_get_disposition(dev, type, code, &value);
+-#ifdef CONFIG_KSU_SUSFS
+-	if (static_branch_unlikely(&ksu_is_input_hook_enabled))
+-		ksu_handle_input_handle_event(&type, &code, &value);
+-#endif
+ 
+ 
+ #ifdef CONFIG_KSU
