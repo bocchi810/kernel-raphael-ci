@@ -85,6 +85,8 @@ jobs:
       CCACHE_COMPILERCHECK: "string:clang-r547379"
       CCACHE_NOHASHDIR: "true"
       CCACHE_HARDLINK: "true"
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: "2G"
     steps:
       # ---------------------------------------------------------------- 源码
       - name: Checkout (build repo)
@@ -316,16 +318,27 @@ jobs:
           echo "$TOOLCHAIN_DIR/bin" >> "$GITHUB_PATH"
           "$TOOLCHAIN_DIR/bin/clang" --version | head -n 2
 
-      - name: Set up ccache
+      # 直接用 actions/cache 管 .ccache：hendrikmuhs/ccache-action 会给 key 再加一层 "ccache-" 前缀，
+      # 保存成 ccache-ccache-raphael-...，而 restore-keys 是 ccache-raphael-...，永远匹配不上（实测每次 No cache found）。
+      - name: Restore ccache
         if: inputs.ccache_enable
-        uses: hendrikmuhs/ccache-action@v1.2
+        uses: actions/cache@v4
         with:
+          path: .ccache
           key: ccache-raphael-${{ env.DEFCONFIG_NAME }}-${{ env.KERNEL_BRANCH }}-${{ github.sha }}
           restore-keys: |
             ccache-raphael-${{ env.DEFCONFIG_NAME }}-${{ env.KERNEL_BRANCH }}-
             ccache-raphael-${{ env.DEFCONFIG_NAME }}-
-          max-size: 2G
-          create-symlink: true
+
+      - name: Prepare ccache
+        if: inputs.ccache_enable
+        run: |
+          set -euo pipefail
+          mkdir -p "$CCACHE_DIR"
+          ccache --set-config=max_size=2G
+          ccache --set-config=compression=true
+          ccache --zero-stats
+          ccache --show-config | grep -E 'cache_dir|max_size|compression' || true
 
       - name: Select compiler wrapper
         run: |
