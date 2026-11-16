@@ -1,0 +1,13 @@
+--- a/security/selinux/avc.c
++++ b/security/selinux/avc.c
+@@ -168,6 +168,10 @@
+ extern u32 susfs_ksu_sid;
+ extern u32 susfs_priv_app_sid;
+ extern struct static_key_false susfs_is_avc_log_spoofing_enabled;
++/* KernelSU Next 不定义这两个 SID（ReSukiSU 才有），而 SUSFS 的 avc 审计伪装会引用它们。
++ * 0 表示未解析：比较永远不会命中，仅退化为不伪装日志，不影响其余 SUSFS 功能。 */
++u32 susfs_ksu_sid;
++u32 susfs_priv_app_sid;
+ #endif
+ 
+ /**
