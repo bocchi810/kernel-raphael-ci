@@ -261,15 +261,21 @@ jobs:
 
       # CONFIG_COMPAT_VDSO=y 时 arm64 的 Makefile 强制要求 CROSS_COMPILE_ARM32，
       # 否则直接 `*** CROSS_COMPILE_ARM32 not defined or empty` 退出（4.14 arch/arm64/Makefile:75）
-      - name: Install arm32 toolchain (compat vDSO)
+      - name: Install cross toolchains (aarch64 + arm32)
         run: |
           set -uo pipefail
+          # 这棵树是 4.14.190 原生树，没有 LLVM=1 支持：clang 只有在 CROSS_COMPILE 非空时
+          # 才从 CLANG_TRIPLE 拿到 --target，否则按宿主 x86_64 编译（报 register 'sp' unsuitable）
           if sudo apt-get install -y --no-install-recommends \
-               gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi; then
+               gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi \
+               gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu; then
             echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> "$GITHUB_ENV"
+            echo "CROSS_COMPILE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
+            echo "CLANG_TRIPLE=aarch64-linux-gnu-" >> "$GITHUB_ENV"
             arm-linux-gnueabi-gcc --version | head -n 1
+            aarch64-linux-gnu-ld --version | head -n 1
           else
-            echo "::warning::arm32 工具链装不上，将在 Configure 阶段关掉 CONFIG_COMPAT_VDSO"
+            echo "::error::交叉工具链安装失败"; exit 1
           fi
 
       - name: Restore clang r547379 cache
