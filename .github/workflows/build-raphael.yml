@@ -110,7 +110,42 @@ jobs:
         with:
           path: builder
           fetch-depth: 1
-          sparse-checkout: tools
+          sparse-checkout: |
+            tools
+            patches
+
+      # 有些 A11/AOSP 树（PE eleven 等）没有内置 KernelSU Next：从上游 legacy 分支取 kernel/ 放进 drivers/kernelsu，
+      # 并补上 SUSFS 需要、但上游没提供的 selinux 侧 glue（susfs_is_current_ksu_domain）。
+      - name: Assemble KernelSU Next driver (if tree has none)
+        if: inputs.ksu_enable
+        env:
+          KSU_SRC: https://github.com/KernelSU-Next/KernelSU-Next.git
+          KSU_REF: legacy
+        run: |
+          set -euo pipefail
+          cd kernel
+          if [ -f drivers/kernelsu/Kconfig ]; then
+            echo "tree already ships drivers/kernelsu, skip"
+            exit 0
+          fi
+          echo "fetch KernelSU Next ($KSU_REF) -> drivers/kernelsu"
+          git clone --depth 1 -b "$KSU_REF" "$KSU_SRC" "$RUNNER_TEMP/ksu" >/dev/null 2>&1
+          rm -rf drivers/kernelsu
+          cp -r "$RUNNER_TEMP/ksu/kernel" drivers/kernelsu
+          test -f drivers/kernelsu/Kconfig
+          if ! grep -rq susfs_is_current_ksu_domain drivers/kernelsu; then
+            echo "add SUSFS selinux glue to the driver"
+            cat >> drivers/kernelsu/selinux/selinux.c <<'EOF'
+          
+          /* SUSFS: fs/susfs.c calls this to detect the ksu domain */
+          bool susfs_is_current_ksu_domain(void)
+          {
+              return is_ksu_domain();
+          }
+          EOF
+          fi
+          grep -rn susfs_is_current_ksu_domain drivers/kernelsu | head -3
+          ls drivers/kernelsu
 
       - name: Inspect kernel source
         run: |
@@ -215,16 +250,16 @@ jobs:
 
       # ---------------------------------------------------------------- 补丁
       - name: Apply local patches (patches/*.patch)
-        if: hashFiles('patches/*.patch', 'kernel/patches/*.patch') != ''
+        if: hashFiles('patches/*.patch', 'kernel/patches/*.patch', 'builder/patches/*.patch') != ''
         run: |
           set -euo pipefail
           cd kernel
           shopt -s nullglob
-          PATCHES=(../patches/*.patch patches/*.patch)
+          PATCHES=(../patches/*.patch ../builder/patches/*.patch patches/*.patch)
           [ ${#PATCHES[@]} -gt 0 ] || { echo "没有补丁，跳过"; exit 0; }
           for p in "${PATCHES[@]}"; do
-            echo "==> applying $p"
-            patch -p1 --forward --batch < "$p"
+            echo "==> applying $(basename "$p")"
+            patch -p1 --forward --batch --fuzz=3 --no-backup-if-mismatch < "$p"
           done
 
       # ---------------------------------------------------------------- 配置
