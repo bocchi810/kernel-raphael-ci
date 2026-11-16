@@ -1,0 +1,15 @@
+--- a/include/linux/init.h
++++ b/include/linux/init.h
+@@ -302,7 +302,11 @@
+ /* Data marked not to be saved by software suspend */
+ #define __nosavedata __section(.data..nosave)
+ 
+-#define __rticdata  __attribute__((section(".bss.rtic")))
++/* 本树没有任何 RTIC 消费者（__bss_rtic_start/end 无人引用），而 __rticdata 唯一用户是
++ * selinux_state；在 Linux 4.14 + 新 binutils 下 .bss.rtic 会被放到 adrp 的 ±4GB 之外，
++ * 导致 vmlinux 链接报 R_AARCH64_ADR_PREL_PG_HI21 relocation truncated。改为普通 .bss。
++ */
++#define __rticdata
+ 
+ #ifdef MODULE
+ #define __exit_p(x) x
