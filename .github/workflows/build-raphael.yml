@@ -328,6 +328,14 @@ jobs:
             echo "CC_VALUE=clang" >> "$GITHUB_ENV"
           fi
           echo "compiler wrapper: $( [ "$CCACHE_ENABLE" = "true" ] && echo ccache || echo none )"
+          # 4.14 + QC 的 techpack Kbuild 里写死了 -Werror，clang 19 多出来的告警会直接把老代码判死；
+          # KCFLAGS 追加在 KBUILD_CFLAGS 末尾，能压掉前面 -Werror / -Werror=xxx
+          KC="-Wno-error"
+          for w in strict-prototypes unused-but-set-variable unused-value implicit-function-declaration implicit-int int-conversion incompatible-pointer-types incompatible-function-pointer-types return-mismatch misleading-indentation address-of-packed-member declaration-after-statement; do
+            KC="$KC -Wno-error=$w"
+          done
+          echo "EXTRA_KCFLAGS=$KC" >> "$GITHUB_ENV"
+          echo "extra cflags: $KC"
 
       # ---------------------------------------------------------------- 补丁
       - name: Apply local patches (patches/*.patch)
@@ -419,7 +427,7 @@ jobs:
           set -euo pipefail
           cd kernel
           echo "CC=$CC_VALUE  JOBS=$(nproc)  VERSION=$KERNEL_VERSION"
-          make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 CC="$CC_VALUE" -j"$(nproc)"
+          make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 CC="$CC_VALUE" KCFLAGS="$EXTRA_KCFLAGS" -j"$(nproc)"
           echo "KERNEL_RELEASE=$(cat out/include/config/kernel.release 2>/dev/null || echo unknown)" >> "$GITHUB_ENV"
 
       - name: ccache statistics
