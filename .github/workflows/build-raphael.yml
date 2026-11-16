@@ -438,6 +438,23 @@ jobs:
           make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 CC="$CC_VALUE" KCFLAGS="$EXTRA_KCFLAGS" DTC=/usr/bin/dtc -j"$(nproc)"
           echo "KERNEL_RELEASE=$(cat out/include/config/kernel.release 2>/dev/null || echo unknown)" >> "$GITHUB_ENV"
 
+      - name: Diagnose vmlinux layout on failure
+        if: failure()
+        run: |
+          set +e
+          V=kernel/out/.tmp_vmlinux1
+          ls -la "$V" || exit 0
+          echo '--- 最低地址符号（relative_base 候选）---'
+          aarch64-linux-gnu-nm -n "$V" | head -5
+          echo '--- 关键符号 ---'
+          aarch64-linux-gnu-nm "$V" | grep -E ' (_text|_stext|__init_begin|__per_cpu_start|__per_cpu_end|_sdata|_edata|_end|__bss_start|__bss_stop|__bss_rtic_start)$'
+          echo '--- 地址为 0 的符号 ---'
+          aarch64-linux-gnu-nm "$V" | awk '$1=="0000000000000000"{print}' | head -10
+          echo '--- 段表 ---'
+          aarch64-linux-gnu-readelf -SW "$V" | grep -E '      \.(text|data|bss|notes|percpu|init)' | head -20
+          echo '--- 程序头 ---'
+          aarch64-linux-gnu-readelf -lW "$V" | head -30
+
       - name: ccache statistics
         if: always() && inputs.ccache_enable
         run: |

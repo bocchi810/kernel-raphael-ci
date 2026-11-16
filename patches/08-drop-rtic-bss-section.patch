@@ -1,0 +1,16 @@
+--- a/arch/arm64/kernel/vmlinux.lds.S
++++ b/arch/arm64/kernel/vmlinux.lds.S
+@@ -253,10 +253,9 @@
+ 	STABS_DEBUG
+ 
+ 	HEAD_SYMBOLS
+-
+-	.bss : {			/* bss segment		*/
+-         RTIC_BSS
+-	}
++	/* 删掉小米遗留的第二个 .bss 输出段（只装 .bss.rtic）：它排在 _end 之后，会让 ld 生成
++	 * 一个 RWX 的 LOAD 段，并让其中的符号跑到 adrp / kallsyms 相对偏移的 4GB 范围之外。
++	 * RTIC 在本树没有任何消费者（__bss_rtic_* 无人引用），整段丢弃。 */
+ }
+ 
+ /*
