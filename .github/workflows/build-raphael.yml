@@ -259,6 +259,19 @@ jobs:
             bc bison build-essential ccache curl flex git libelf-dev libncurses-dev \
             libssl-dev unzip zip wget libarchive-tools rsync python3 ca-certificates
 
+      # CONFIG_COMPAT_VDSO=y 时 arm64 的 Makefile 强制要求 CROSS_COMPILE_ARM32，
+      # 否则直接 `*** CROSS_COMPILE_ARM32 not defined or empty` 退出（4.14 arch/arm64/Makefile:75）
+      - name: Install arm32 toolchain (compat vDSO)
+        run: |
+          set -uo pipefail
+          if sudo apt-get install -y --no-install-recommends \
+               gcc-arm-linux-gnueabi binutils-arm-linux-gnueabi; then
+            echo "CROSS_COMPILE_ARM32=arm-linux-gnueabi-" >> "$GITHUB_ENV"
+            arm-linux-gnueabi-gcc --version | head -n 1
+          else
+            echo "::warning::arm32 工具链装不上，将在 Configure 阶段关掉 CONFIG_COMPAT_VDSO"
+          fi
+
       - name: Restore clang r547379 cache
         id: clang-cache
         uses: actions/cache/restore@v4
@@ -367,6 +380,12 @@ jobs:
 
           if [ -n "$LOCALVERSION_SUFFIX" ]; then
             ./scripts/config --file out/.config --set-str LOCALVERSION "-${LOCALVERSION_SUFFIX}"
+          fi
+
+          # 没有 arm32 交叉工具链就必须关 COMPAT_VDSO，否则 arm64 Makefile 解析阶段直接报错
+          if [ -z "${CROSS_COMPILE_ARM32:-}" ] && grep -q "^CONFIG_COMPAT_VDSO=y" out/.config; then
+            echo "::warning::未装 arm32 工具链，关闭 CONFIG_COMPAT_VDSO（32 位进程仍可运行，只是没有 vDSO）"
+            ./scripts/config --file out/.config -d COMPAT_VDSO
           fi
 
           make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 olddefconfig
