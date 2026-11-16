@@ -467,11 +467,18 @@ jobs:
           set -euo pipefail
           IMG=kernel/out/arch/arm64/boot
           test -f "$IMG/Image.gz-dtb" || { echo "::error::缺少 Image.gz-dtb"; ls -l "$IMG"; exit 1; }
-          test -f "$IMG/dtbo.img"    || { echo "::error::缺少 dtbo.img"; exit 1; }
 
           git clone --depth=1 https://github.com/SOVIET-ANDROID/AnyKernel3.git ak3
           rm -rf ak3/.git
-          cp -f "$IMG/Image.gz-dtb" "$IMG/dtbo.img" ak3/
+          cp -f "$IMG/Image.gz-dtb" ak3/
+          # 有的树（如 PE eleven 4.14）不产出 dtbo.img：那就别把 dtbo 塞进 zip，也别让 anykernel.sh 去刷它
+          if [ -f "$IMG/dtbo.img" ]; then
+            cp -f "$IMG/dtbo.img" ak3/
+          else
+            echo "本树没有 dtbo.img：跳过 dtbo 分区，并关掉 anykernel.sh 里的 flash_dtbo"
+            sed -i -E 's/^[[:space:]]*flash_dtbo;/# flash_dtbo; # dtbo.img 未生成/' ak3/anykernel.sh
+            grep -n 'flash_' ak3/anykernel.sh || true
+          fi
 
           NAME="raphael-${KERNEL_BRANCH}-${KERNEL_VERSION}-${KERNEL_COMMIT}-$(date -u +%Y%m%d-%H%M)"
           ( cd ak3 && zip -r9 "../${NAME}.zip" * )
