@@ -1,0 +1,30 @@
+# KernelSU Next CI · 红米 K20 Pro (raphael) · Evolution-X 内核源（树内自带 KSU Next，不打 SUSFS）
+name: CI - KernelSU Next
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/build-evolutionx.yml
+      - .github/workflows/ci-ksunext.yml
+      - ak3/**
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ci-ksunext-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ksunext:
+    name: KernelSU Next only
+    uses: ./.github/workflows/build-evolutionx.yml
+    with:
+      flavor: ksunext
+      kernel_repo: https://github.com/Evolution-X-Devices/kernel_xiaomi_raphael
+      kernel_ref: cnb
+      defconfig: vendor/sm8150-perf_defconfig
+      fragments: vendor/xiaomi/sm8150-common.config vendor/xiaomi/raphael.config
+      ccache_enable: true

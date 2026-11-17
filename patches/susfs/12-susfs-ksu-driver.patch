@@ -1,0 +1,272 @@
+diff --git a/drivers/kernelsu/Kconfig b/drivers/kernelsu/Kconfig
+index 946966dc3..c91f83448 100644
+--- a/drivers/kernelsu/Kconfig
++++ b/drivers/kernelsu/Kconfig
+@@ -72,4 +72,86 @@ config KSU_SYSCALL_TABLE_HOOK
+ 
+ endchoice
+ 
++
++menu "KernelSU - SUSFS"
++config KSU_SUSFS
++	bool "KernelSU addon - SUSFS"
++	depends on KSU
++	depends on THREAD_INFO_IN_TASK
++	default y
++	help
++	  Patch and Enable SUSFS to kernel with KernelSU.
++
++config KSU_SUSFS_SUS_PATH
++	bool "Enable to hide suspicious path (NOT recommended)"
++	depends on KSU_SUSFS
++	default y
++	help
++	  Allow hiding the user-defined path and all its sub-paths from various system calls.
++
++config KSU_SUSFS_SUS_MOUNT
++	bool "Enable to hide suspicious mounts"
++	depends on KSU_SUSFS
++	default y
++	help
++	  Allow hiding the user-defined mount paths from /proc/self/[mounts|mountinfo|mountstat].
++
++config KSU_SUSFS_SUS_KSTAT
++	bool "Enable to spoof suspicious kstat"
++	depends on KSU_SUSFS
++	default y
++	help
++	  Allow spoofing the kstat of user-defined file/directory.
++
++config KSU_SUSFS_TRY_UMOUNT
++	bool "Enable to use ksu's try_umount"
++	depends on KSU_SUSFS
++	default y
++	help
++	  Allow using try_umount to umount other user-defined mount paths.
++
++config KSU_SUSFS_SPOOF_UNAME
++	bool "Enable to spoof uname"
++	depends on KSU_SUSFS
++	default y
++	help
++	  Allow spoofing the string returned by uname syscall.
++
++config KSU_SUSFS_ENABLE_LOG
++	bool "Enable logging susfs log to kernel"
++	depends on KSU_SUSFS
++	default y
++	help
++	  Allow logging susfs log to kernel.
++
++config KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
++	bool "Enable to automatically hide ksu and susfs symbols from /proc/kallsyms"
++	depends on KSU_SUSFS
++	default y
++	help
++	  Automatically hide ksu and susfs symbols from /proc/kallsyms.
++
++config KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
++	bool "Enable to spoof /proc/bootconfig or /proc/cmdline"
++	depends on KSU_SUSFS
++	default y
++	help
++	  Spoof the output of /proc/bootconfig or /proc/cmdline with a user-defined file.
++
++config KSU_SUSFS_OPEN_REDIRECT
++	bool "Enable to redirect a path to be opened with another path (experimental)"
++	depends on KSU_SUSFS
++	default y
++	help
++	  Allow redirecting a target path to be opened with another user-defined path.
++
++config KSU_SUSFS_SUS_MAP
++	bool "Enable to hide some mmapped real file from proc maps interfaces"
++	depends on KSU_SUSFS
++	default y
++	help
++	  Allow hiding mmapped real file from /proc/<pid>/[maps|smaps|...].
++
++endmenu
++
+ endmenu
+diff --git a/drivers/kernelsu/core/init.c b/drivers/kernelsu/core/init.c
+index e6562de17..4041329ce 100644
+--- a/drivers/kernelsu/core/init.c
++++ b/drivers/kernelsu/core/init.c
+@@ -18,6 +18,10 @@
+ #include "runtime/ksud_boot.h"
+ #include "supercall/supercall.h"
+ #include "ksu.h"
++
++#ifdef CONFIG_KSU_SUSFS
++#include <linux/susfs.h>
++#endif
+ #include "feature/sulog.h"
+ #include "infra/file_wrapper.h"
+ #include "selinux/selinux.h"
+@@ -150,6 +154,10 @@ int __init kernelsu_init(void)
+ 
+ 	ksu_supercalls_init();
+ 
++#ifdef CONFIG_KSU_SUSFS
++	susfs_init();
++#endif
++
+ 	ksu_app_profile_init();
+ 
+ 	if (ksu_late_loaded) {
+diff --git a/drivers/kernelsu/selinux/selinux.c b/drivers/kernelsu/selinux/selinux.c
+index 258ca8196..8bbffb86c 100644
+--- a/drivers/kernelsu/selinux/selinux.c
++++ b/drivers/kernelsu/selinux/selinux.c
+@@ -255,6 +255,14 @@ bool is_ksu_domain(void)
+     return is_task_ksu_domain(current_cred());
+ }
+ 
++#ifdef CONFIG_KSU_SUSFS
++/* SUSFS: fs/susfs.c + fs/namespace.c call this to tell whether the caller is ksu */
++bool susfs_is_current_ksu_domain(void)
++{
++    return is_ksu_domain();
++}
++#endif
++
+ bool is_zygote(const struct cred *cred)
+ {
+     return is_sid_match(cred, cached_zygote_sid, ZYGOTE_CONTEXT);
+diff --git a/drivers/kernelsu/supercall/dispatch.c b/drivers/kernelsu/supercall/dispatch.c
+index 927240415..b87ced297 100644
+--- a/drivers/kernelsu/supercall/dispatch.c
++++ b/drivers/kernelsu/supercall/dispatch.c
+@@ -13,6 +13,10 @@
+ #include "arch.h" // IWYU pragma: keep
+ #include "policy/allowlist.h"
+ #include "policy/feature.h"
++
++#ifdef CONFIG_KSU_SUSFS
++#include <linux/susfs.h>
++#endif
+ #include "klog.h" // IWYU pragma: keep
+ #include "ksu.h"
+ #include "runtime/ksud_boot.h"
+@@ -137,6 +141,9 @@ static int do_report_event(void __user *arg)
+ 			} else {
+ 				pr_info("boot_complete triggered\n");
+ 				on_boot_completed();
++#ifdef CONFIG_KSU_SUSFS
++				susfs_start_sdcard_monitor_fn();
++#endif
+ 			}
+ 		}
+ 		break;
+diff --git a/drivers/kernelsu/supercall/supercall.c b/drivers/kernelsu/supercall/supercall.c
+index 9c7ac7bb8..51827169d 100644
+--- a/drivers/kernelsu/supercall/supercall.c
++++ b/drivers/kernelsu/supercall/supercall.c
+@@ -22,6 +22,11 @@
+ 
+ #include "sulog/event.h"
+ 
++#ifdef CONFIG_KSU_SUSFS
++#include <linux/susfs.h>
++#include <linux/susfs_def.h>
++#endif
++
+ uint32_t ksuver_override = 0;
+ 
+ #define KSU_DRIVER_PERMISSION_SU_SESSION (1UL << 0)
+@@ -126,6 +131,94 @@ int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd,
+ 	if (magic1 != KSU_INSTALL_MAGIC1)
+ 		return 0;
+ 
++#ifdef CONFIG_KSU_SUSFS
++	if (magic2 == SUSFS_MAGIC && current_uid().val == 0) {
++#ifdef CONFIG_KSU_SUSFS_SUS_PATH
++		if (cmd == CMD_SUSFS_ADD_SUS_PATH) {
++			susfs_add_sus_path(arg);
++			return 0;
++		}
++		if (cmd == CMD_SUSFS_ADD_SUS_PATH_LOOP) {
++			susfs_add_sus_path_loop(arg);
++			return 0;
++		}
++#endif // CONFIG_KSU_SUSFS_SUS_PATH
++#ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
++		if (cmd == CMD_SUSFS_HIDE_SUS_MNTS_FOR_NON_SU_PROCS) {
++			susfs_set_hide_sus_mnts_for_non_su_procs(arg);
++			return 0;
++		}
++#endif // CONFIG_KSU_SUSFS_SUS_MOUNT
++#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
++		if (cmd == CMD_SUSFS_ADD_SUS_KSTAT) {
++			susfs_add_sus_kstat(arg);
++			return 0;
++		}
++		if (cmd == CMD_SUSFS_UPDATE_SUS_KSTAT) {
++			susfs_update_sus_kstat(arg);
++			return 0;
++		}
++		if (cmd == CMD_SUSFS_ADD_SUS_KSTAT_STATICALLY) {
++			susfs_add_sus_kstat(arg);
++			return 0;
++		}
++#endif // CONFIG_KSU_SUSFS_SUS_KSTAT
++#ifdef CONFIG_KSU_SUSFS_TRY_UMOUNT
++		if (cmd == CMD_SUSFS_ADD_TRY_UMOUNT) {
++			susfs_add_try_umount(arg);
++			return 0;
++		}
++#endif // CONFIG_KSU_SUSFS_TRY_UMOUNT
++#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
++		if (cmd == CMD_SUSFS_SET_UNAME) {
++			susfs_set_uname(arg);
++			return 0;
++		}
++#endif // CONFIG_KSU_SUSFS_SPOOF_UNAME
++#ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
++		if (cmd == CMD_SUSFS_ENABLE_LOG) {
++			susfs_enable_log(arg);
++			return 0;
++		}
++#endif // CONFIG_KSU_SUSFS_ENABLE_LOG
++#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
++		if (cmd == CMD_SUSFS_SET_CMDLINE_OR_BOOTCONFIG) {
++			susfs_set_cmdline_or_bootconfig(arg);
++			return 0;
++		}
++#endif // CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
++#ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
++		if (cmd == CMD_SUSFS_ADD_OPEN_REDIRECT) {
++			susfs_add_open_redirect(arg);
++			return 0;
++		}
++#endif // CONFIG_KSU_SUSFS_OPEN_REDIRECT
++#ifdef CONFIG_KSU_SUSFS_SUS_MAP
++		if (cmd == CMD_SUSFS_ADD_SUS_MAP) {
++			susfs_add_sus_map(arg);
++			return 0;
++		}
++#endif // CONFIG_KSU_SUSFS_SUS_MAP
++		if (cmd == CMD_SUSFS_ENABLE_AVC_LOG_SPOOFING) {
++			susfs_set_avc_log_spoofing(arg);
++			return 0;
++		}
++		if (cmd == CMD_SUSFS_SHOW_ENABLED_FEATURES) {
++			susfs_get_enabled_features(arg);
++			return 0;
++		}
++		if (cmd == CMD_SUSFS_SHOW_VARIANT) {
++			susfs_show_variant(arg);
++			return 0;
++		}
++		if (cmd == CMD_SUSFS_SHOW_VERSION) {
++			susfs_show_version(arg);
++			return 0;
++		}
++		return 0;
++	}
++#endif // CONFIG_KSU_SUSFS
++
+ #ifdef CONFIG_KSU_DEBUG
+ 	pr_info("sys_reboot: intercepted call! magic: 0x%x id: %d\n", magic1,
+ 		magic2);

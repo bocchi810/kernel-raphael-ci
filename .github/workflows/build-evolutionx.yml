@@ -1,0 +1,451 @@
+# =============================================================================
+#  红米 K20 Pro / Mi 9T Pro (raphael / raphaelin, SM8150, Linux 4.14)
+#  内核源 : Evolution-X-Devices/kernel_xiaomi_raphael @ cnb (4.14.357-openela)
+#  产物   : AnyKernel3 可直刷 zip（uncompressed Image + vendor 模块，不再产出 boot.img）
+#
+#  这是可复用引擎（workflow_call，也可在 Actions 页面手动 workflow_dispatch）：
+#    ci-ksunext.yml -> flavor=ksunext   只有 KernelSU Next（树内自带驱动，原样编译）
+#    ci-susfs.yml   -> flavor=susfs     KernelSU Next + SUSFS v2.1.0（打 patches/susfs）
+#
+#  Evolution-X cnb 的事实（决定了下面这些参数，改动前先读 README）：
+#    * 设备树 sm8150-common 的 BoardConfig 用 vendor/sm8150-perf_defconfig
+#      再 merge vendor/xiaomi/sm8150-common.config 与 vendor/xiaomi/raphael.config
+#    * BOARD_KERNEL_IMAGE_NAME := Image（未压缩），BOARD_INCLUDE_DTB_IN_BOOTIMG := true
+#      -> 只 flash boot 分区即可，dtb 与 dtbo 都沿用 ROM 自带的
+#    * 树里自带 drivers/kernelsu（KernelSU-Next v3.4.0-legacy 快照），但没有 SUSFS
+#    * arch/arm64/Kconfig 已经 select THREAD_INFO_IN_TASK（KSU_SUSFS 的依赖）
+# =============================================================================
+name: build-evolutionx
+
+on:
+  workflow_call:
+    inputs:
+      flavor:
+        description: ksunext | susfs
+        required: true
+        type: string
+      kernel_repo:
+        description: 内核源码仓库
+        required: false
+        type: string
+        default: https://github.com/Evolution-X-Devices/kernel_xiaomi_raphael
+      kernel_ref:
+        description: 源码分支或标签
+        required: false
+        type: string
+        default: cnb
+      defconfig:
+        description: 基础 defconfig（相对 arch/arm64/configs）
+        required: false
+        type: string
+        default: vendor/sm8150-perf_defconfig
+      fragments:
+        description: 追加的 fragment config，空格分隔（相对 arch/arm64/configs）
+        required: false
+        type: string
+        default: vendor/xiaomi/sm8150-common.config vendor/xiaomi/raphael.config
+      localversion:
+        description: 额外版本后缀（留空=保持树默认 -perf）
+        required: false
+        type: string
+        default: ""
+      clang_tag:
+        description: AOSP clang 目录名
+        required: false
+        type: string
+        default: clang-r547379
+      clang_branch:
+        description: crDroid clang 镜像分支
+        required: false
+        type: string
+        default: "15.0"
+      ccache_enable:
+        description: 启用 ccache
+        required: false
+        type: boolean
+        default: true
+      release:
+        description: 构建成功后发布 GitHub Release
+        required: false
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      flavor:
+        description: 构建哪种 flavor
+        required: true
+        type: choice
+        options:
+          - susfs
+          - ksunext
+        default: susfs
+      kernel_ref:
+        description: 源码分支或标签（Evolution-X 内核树）
+        required: false
+        type: string
+        default: cnb
+      defconfig:
+        description: 基础 defconfig（相对 arch/arm64/configs）
+        required: false
+        type: string
+        default: vendor/sm8150-perf_defconfig
+      fragments:
+        description: 追加的 fragment config，空格分隔
+        required: false
+        type: string
+        default: vendor/xiaomi/sm8150-common.config vendor/xiaomi/raphael.config
+      localversion:
+        description: 额外版本后缀（留空=保持树默认 -perf）
+        required: false
+        type: string
+        default: ""
+      clang_tag:
+        description: AOSP clang 目录名
+        required: false
+        type: string
+        default: clang-r547379
+      clang_branch:
+        description: crDroid clang 镜像分支
+        required: false
+        type: string
+        default: "15.0"
+      ccache_enable:
+        description: 启用 ccache
+        required: false
+        type: boolean
+        default: true
+      release:
+        description: 构建成功后发布 GitHub Release
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kernel-raphael-${{ inputs.flavor }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ inputs.flavor }} · raphael
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    env:
+      ARCH: arm64
+      SUBARCH: arm64
+      FLAVOR: ${{ inputs.flavor }}
+      KERNEL_REPO: ${{ inputs.kernel_repo }}
+      KERNEL_REF: ${{ inputs.kernel_ref }}
+      DEFCONFIG_NAME: ${{ inputs.defconfig }}
+      FRAGMENTS: ${{ inputs.fragments }}
+      LOCALVERSION_SUFFIX: ${{ inputs.localversion }}
+      TOOLCHAIN_DIR: ${{ github.workspace }}/toolchain/${{ inputs.clang_tag }}
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_COMPILERCHECK: string:${{ inputs.clang_tag }}
+      CCACHE_NOHASHDIR: true
+      CCACHE_HARDLINK: true
+      KBUILD_BUILD_USER: gha
+      KBUILD_BUILD_HOST: github-actions
+    steps:
+      # ---------------------------------------------------------------- 源码
+      - name: Checkout (builder repo)
+        uses: actions/checkout@v4
+        with:
+          path: builder
+          fetch-depth: 1
+
+      - name: Free disk space
+        run: |
+          set -euo pipefail
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          docker image prune -af || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache cpio curl flex git kmod libelf-dev \
+            libncurses-dev libssl-dev python3 rsync unzip zip wget libarchive-tools ca-certificates
+          ccache --version | head -n 1
+
+      - name: Restore clang cache
+        id: clang-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.TOOLCHAIN_DIR }}
+          key: ${{ inputs.clang_tag }}-v2
+
+      - name: Download clang
+        if: steps.clang-cache.outputs.cache-hit != "true"
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$TOOLCHAIN_DIR")"
+          git clone --depth=1 --branch "${{ inputs.clang_branch }}" \
+            "https://gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_${{ inputs.clang_tag }}.git" \
+            "$TOOLCHAIN_DIR"
+          rm -rf "$TOOLCHAIN_DIR/.git"
+
+      - name: Save clang cache
+        if: steps.clang-cache.outputs.cache-hit != "true"
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.TOOLCHAIN_DIR }}
+          key: ${{ inputs.clang_tag }}-v2
+
+      - name: Add clang to PATH
+        run: |
+          set -euo pipefail
+          echo "$TOOLCHAIN_DIR/bin" >> "$GITHUB_PATH"
+          "$TOOLCHAIN_DIR/bin/clang" --version | head -n 2
+
+      - name: Restore ccache
+        if: inputs.ccache_enable
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          key: ccache-${{ inputs.flavor }}-${{ inputs.defconfig }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ inputs.flavor }}-${{ inputs.defconfig }}-
+            ccache-${{ inputs.flavor }}-
+
+      - name: Prepare ccache and compiler flags
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.ccache_enable }}" = "true" ]; then
+            mkdir -p "$CCACHE_DIR"
+            ccache --set-config=max_size=2G
+            ccache --set-config=compression=true
+            ccache --zero-stats
+            echo "CC_VALUE=ccache clang" >> "$GITHUB_ENV"
+          else
+            echo "CC_VALUE=clang" >> "$GITHUB_ENV"
+          fi
+          # 4.14 + QC techpack 的 Kbuild 里写死了 -Werror，新版 clang 多出来的告警会把老代码判死；
+          # KCFLAGS 追加在 KBUILD_CFLAGS 末尾，可以盖掉前面的 -Werror
+          KC="-Wno-error"
+          for w in strict-prototypes unused-but-set-variable unused-value implicit-function-declaration implicit-int int-conversion incompatible-pointer-types incompatible-function-pointer-types return-mismatch misleading-indentation address-of-packed-member declaration-after-statement; do
+            KC="$KC -Wno-error=$w"
+          done
+          echo "EXTRA_KCFLAGS=$KC" >> "$GITHUB_ENV"
+          echo "extra cflags: $KC"
+
+      - name: Clone Evolution-X kernel source
+        run: |
+          set -euo pipefail
+          git clone --depth=1 --branch "$KERNEL_REF" "$KERNEL_REPO" kernel
+          cd kernel
+          kv() { grep -m1 -E "^$1 = " Makefile | sed -E "s/.*= *//"; }
+          KVER="$(kv VERSION).$(kv PATCHLEVEL).$(kv SUBLEVEL)"
+          echo "KERNEL_VERSION=$KVER" >> "$GITHUB_ENV"
+          echo "KERNEL_COMMIT=$(git rev-parse --short=8 HEAD)" >> "$GITHUB_ENV"
+          echo "source : $(git remote get-url origin) @ $(git rev-parse --short=8 HEAD)"
+          echo "version: $KVER"
+          test -f "arch/arm64/configs/$DEFCONFIG_NAME" || {
+            echo "::error::找不到 defconfig: $DEFCONFIG_NAME"
+            find arch/arm64/configs -name "*_defconfig" | head -n 40
+            exit 1
+          }
+          test -f drivers/kernelsu/Kconfig || {
+            echo "::error::树里没有 drivers/kernelsu：Evolution-X cnb 应当自带 KernelSU Next"
+            exit 1
+          }
+
+      # ---------------------------------------------------------------- 补丁
+      - name: Apply SUSFS patches
+        if: inputs.flavor == "susfs"
+        run: |
+          set -euo pipefail
+          cd kernel
+          shopt -s nullglob
+          PATCHES=(../builder/patches/susfs/*.patch)
+          [ ${#PATCHES[@]} -gt 0 ] || { echo "::error::patches/susfs 里没有补丁"; exit 1; }
+          for p in "${PATCHES[@]}"; do
+            echo "==> applying $(basename "$p")"
+            patch -p1 --forward --batch --fuzz=3 --no-backup-if-mismatch < "$p"
+          done
+          test -f fs/susfs.c
+          test -f include/linux/susfs.h
+          test -f include/linux/susfs_def.h
+          grep -q CONFIG_KSU_SUSFS fs/Makefile
+          grep -q "config KSU_SUSFS" drivers/kernelsu/Kconfig
+          grep -q SUSFS_MAGIC drivers/kernelsu/supercall/supercall.c
+          grep -q susfs_is_current_ksu_domain drivers/kernelsu/selinux/selinux.c
+          grep -q susfs_init drivers/kernelsu/core/init.c
+          echo "SUSFS patch set applied"
+
+      - name: Assert SUSFS absent on ksunext flavor
+        if: inputs.flavor != "susfs"
+        run: |
+          set -euo pipefail
+          cd kernel
+          if [ -e fs/susfs.c ] || grep -q "config KSU_SUSFS" drivers/kernelsu/Kconfig; then
+            echo "::error::ksunext flavor 不该有 SUSFS，但树里已经有（flavor 选错或源码被改过）"
+            exit 1
+          fi
+          echo "ksunext flavor: 树内无 SUSFS，符合预期"
+
+      # ---------------------------------------------------------------- 配置
+      - name: Configure kernel (Evolution-X board config + KSU/SUSFS)
+        run: |
+          set -euo pipefail
+          cd kernel
+          make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 "$DEFCONFIG_NAME"
+
+          FRAG_PATHS=""
+          for f in $FRAGMENTS; do
+            test -f "arch/arm64/configs/$f" || { echo "::error::缺少 fragment: $f"; exit 1; }
+            FRAG_PATHS="$FRAG_PATHS arch/arm64/configs/$f"
+          done
+          if [ -n "$FRAG_PATHS" ]; then
+            echo "merging fragments:$FRAG_PATHS"
+            ARCH=arm64 scripts/kconfig/merge_config.sh -m -O out out/.config $FRAG_PATHS
+            make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 olddefconfig
+          fi
+
+          ./scripts/config --file out/.config -e KSU
+          ./scripts/config --file out/.config -e KSU_MANUAL_HOOK
+          ./scripts/config --file out/.config -d KSU_KPROBES_HOOK
+          ./scripts/config --file out/.config -d KSU_SYSCALL_TABLE_HOOK
+
+          SUSFS_OPTS=$(grep -E "^[[:space:]]*config[[:space:]]+KSU_SUSFS" drivers/kernelsu/Kconfig | sed -E "s/^[[:space:]]*config[[:space:]]+//" | sort -u)
+          echo "SUSFS options in tree: ${SUSFS_OPTS:-none}"
+          if [ "$FLAVOR" = "susfs" ]; then
+            [ -n "$SUSFS_OPTS" ] || { echo "::error::susfs flavor 但 Kconfig 里没有 KSU_SUSFS"; exit 1; }
+            for opt in $SUSFS_OPTS; do ./scripts/config --file out/.config -e "$opt"; done
+          else
+            for opt in $SUSFS_OPTS; do ./scripts/config --file out/.config -d "$opt"; done
+          fi
+
+          if [ -n "$LOCALVERSION_SUFFIX" ]; then
+            ./scripts/config --file out/.config --set-str LOCALVERSION "-$LOCALVERSION_SUFFIX"
+          fi
+
+          make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 olddefconfig
+
+          echo "---- 关键配置 ----"
+          grep -E "^(CONFIG_KSU|CONFIG_KSU_SUSFS|CONFIG_KSU_MANUAL_HOOK|CONFIG_KSU_KPROBES_HOOK|CONFIG_THREAD_INFO_IN_TASK|CONFIG_LOCALVERSION|CONFIG_MODULES|CONFIG_BUILD_ARM64_UNCOMPRESSED_KERNEL|CONFIG_MODULE_SIG_FORCE|CONFIG_LTO_CLANG)=" out/.config || true
+          echo "------------------"
+
+          rc=0
+          grep -qx "CONFIG_KSU=y" out/.config || { echo "::error::CONFIG_KSU 没有生效"; rc=1; }
+          grep -qx "CONFIG_KSU_MANUAL_HOOK=y" out/.config || { echo "::error::CONFIG_KSU_MANUAL_HOOK 没有生效（4.14 必须用 manual hook）"; rc=1; }
+          grep -qx "CONFIG_THREAD_INFO_IN_TASK=y" out/.config || { echo "::error::CONFIG_THREAD_INFO_IN_TASK 没有生效"; rc=1; }
+          if [ "$FLAVOR" = "susfs" ]; then
+            grep -qx "CONFIG_KSU_SUSFS=y" out/.config || { echo "::error::CONFIG_KSU_SUSFS 没有生效"; rc=1; }
+          else
+            if grep -q "^CONFIG_KSU_SUSFS=y" out/.config; then
+              echo "::error::ksunext flavor 却打开了 KSU_SUSFS"; rc=1
+            fi
+          fi
+          exit $rc
+
+      # ---------------------------------------------------------------- 编译
+      - name: Build kernel image and modules
+        run: |
+          set -euo pipefail
+          cd kernel
+          echo "CC=$CC_VALUE JOBS=$(nproc) VERSION=$KERNEL_VERSION"
+          make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 CC="$CC_VALUE" KCFLAGS="$EXTRA_KCFLAGS" -j"$(nproc)" Image modules
+          IMG=out/arch/arm64/boot/Image
+          test -f "$IMG" || { echo "::error::没有产出 Image"; ls -l out/arch/arm64/boot | head -n 40; exit 1; }
+          ls -lh "$IMG"
+          echo "KERNEL_RELEASE=$(cat out/include/config/kernel.release)" >> "$GITHUB_ENV"
+          echo "built: $KERNEL_VERSION / $(cat out/include/config/kernel.release)"
+
+      - name: ccache statistics
+        if: always() && inputs.ccache_enable
+        run: |
+          ccache --show-stats --verbose || ccache --show-stats || true
+
+      # ---------------------------------------------------------------- 模块
+      # 只刷 boot 分区不会更新 /vendor/lib/modules，而模块的 vermagic 里带着内核 release 串
+      # （这棵树 CONFIG_LOCALVERSION_AUTO=y，ROM 的 release 带 -g<hash>），所以必须把本次编译的
+      # 模块一起打进 zip 并覆盖到 /vendor/lib/modules，否则 wifi/音频等模块加载会失败。
+      - name: Install modules to staging tree
+        run: |
+          set -euo pipefail
+          cd kernel
+          rm -rf "$GITHUB_WORKSPACE/modout"
+          make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 CC="$CC_VALUE" \
+            INSTALL_MOD_PATH="$GITHUB_WORKSPACE/modout" INSTALL_MOD_STRIP=1 modules_install
+          find "$GITHUB_WORKSPACE/modout" -name "*.ko" | wc -l
+          du -sh "$GITHUB_WORKSPACE/modout"
+
+      - name: Collect modules (flat /vendor/lib/modules layout)
+        run: |
+          set -euo pipefail
+          rm -rf modflat
+          mkdir -p modflat
+          find "$GITHUB_WORKSPACE/modout" -name "*.ko" -exec cp -f {} modflat/ \;
+          N=$(ls -1 modflat/*.ko 2>/dev/null | wc -l)
+          echo "modules: $N"
+          [ "$N" -gt 0 ] || { echo "::error::一个 .ko 都没有，检查 CONFIG_MODULES"; exit 1; }
+          ls -1 modflat | head -n 20
+          echo "MODULE_COUNT=$N" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------------- 打包
+      - name: Package AnyKernel3 zip
+        id: package
+        run: |
+          set -euo pipefail
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
+          rm -rf ak3/.git
+          cp -f builder/ak3/anykernel.sh ak3/anykernel.sh
+          sed -i -E "s|@KERNEL_STRING@|Evolution-X ${FLAVOR} kernel for raphael (CI)|" ak3/anykernel.sh
+          cp -f kernel/out/arch/arm64/boot/Image ak3/Image
+          mkdir -p ak3/modules/vendor/lib/modules
+          cp -f modflat/*.ko ak3/modules/vendor/lib/modules/
+          rm -f ak3/modules/vendor/lib/modules/placeholder
+          echo "---- anykernel.sh 摘要 ----"
+          grep -nE "kernel.string|device.name|BLOCK=|IS_SLOT_DEVICE|do.modules|do.systemless|flash_" ak3/anykernel.sh
+          echo "---------------------------"
+          NAME="raphael-evox-${FLAVOR}-${KERNEL_VERSION}-${KERNEL_COMMIT}-$(date -u +%Y%m%d-%H%M)"
+          mkdir -p dist
+          ( cd ak3 && zip -r9 "../dist/${NAME}.zip" * > /dev/null )
+          ls -lh "dist/${NAME}.zip"
+          unzip -l "dist/${NAME}.zip" | tail -n 12
+          echo "ZIP_NAME=${NAME}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.ZIP_NAME }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        if: inputs.release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: raphael-${{ inputs.flavor }}-${{ github.run_number }}
+          name: ${{ steps.package.outputs.ZIP_NAME }}
+          files: dist/${{ steps.package.outputs.ZIP_NAME }}
+          generate_release_notes: true
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## raphael kernel · Evolution-X · $FLAVOR"
+            echo ""
+            echo "| item | value |"
+            echo "|---|---|"
+            echo "| source | $KERNEL_REPO @ $KERNEL_REF |"
+            echo "| kernel | $KERNEL_VERSION ($KERNEL_COMMIT) |"
+            echo "| release | $KERNEL_RELEASE |"
+            echo "| defconfig | $DEFCONFIG_NAME + $FRAGMENTS |"
+            echo "| KSU / SUSFS | KSU_NEXT / $FLAVOR (manual hook) |"
+            echo "| modules | $MODULE_COUNT |"
+            echo "| AK3 zip | ${{ steps.package.outputs.ZIP_NAME }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ inputs.ccache_enable }}" = "true" ]; then
+            { echo ""; echo "<details><summary>ccache stats</summary>"; echo ""; echo "```"; ccache --show-stats || true; echo "```"; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
+          fi

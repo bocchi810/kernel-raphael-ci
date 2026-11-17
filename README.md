@@ -1,189 +1,130 @@
-# 红米 K20 Pro (raphael) 内核 GitHub Actions 构建流水线
+# 红米 K20 Pro (raphael) 内核 GitHub Actions 构建流水线 · Evolution-X 版
 
-> KernelSU Next + SUSFS + ccache，产出 AnyKernel3 直刷 zip（boot + dtbo）。
-> 默认源码是已经内置 KernelSU Next 与 SUSFS 的 `SOVIET-ANDROID/kernel_xiaomi_raphael@16.0-SUSFS`（Linux 4.14.357）。
+> 内核源码换成 `Evolution-X-Devices/kernel_xiaomi_raphael`（默认分支 `cnb`，Linux **4.14.357-openela**），
+> 产出 **AnyKernel3 直刷 zip**（未压缩 `Image` + 本次编译的 vendor 模块）。**不再产出 boot.img。**
+>
+> 两条独立 CI：**CI - SUSFS**（KernelSU Next + SUSFS v2.1.0）与 **CI - KernelSU Next**（只有 KSU Next）。
 
-## 1. 这套流水线实际在编什么
+## 0. 这套流水线实际在编什么
 
 | 项 | 值 | 依据 |
 |---|---|---|
-| 机型 | Redmi K20 Pro / Mi 9T Pro（`raphael` / `raphaelin`），SM8150 | AnyKernel3 `device.name1=raphael` / `device.name2=raphaelin` |
-| 内核 | 4.14.357 | 分支 `16.0-SUSFS` 的 `Makefile`：`VERSION=4 PATCHLEVEL=14 SUBLEVEL=357` |
-| 源码 | `https://github.com/SOVIET-ANDROID/kernel_xiaomi_raphael` 分支 `16.0-SUSFS` | 仓库内 `drivers/kernelsu/` 与 `fs/susfs.c` 均已存在 |
-| KernelSU | KernelSU **Next**（driver 内置） | `drivers/kernelsu/setup.sh` 里 `OWNER="KernelSU-Next"`；`Kbuild` 里 `KSU_GIT_VERSION := 2980`，按 `30000+git+150` 算出版本约 `33130` |
-| SUSFS | 内核树内置（`CONFIG_KSU_SUSFS*`） | `drivers/kernelsu/Kconfig` 第 62 行起 `menu "KernelSU - SUSFS"` |
-| 工具链 | AOSP clang `r547379`（crDroid prebuilt 镜像） | 上游 `.github/workflows/main.yml` 用的同一份 |
-| 打包 | `SOVIET-ANDROID/AnyKernel3`（A-only，刷 boot + dtbo） | `anykernel.sh`：`IS_SLOT_DEVICE=0`、`flash_boot; flash_dtbo` |
-| 加速 | ccache（`hendrikmuhs/ccache-action`，默认上限 2G） | 见第 4 节 |
+| 机型 | Redmi K20 Pro / Mi 9T Pro（`raphael` / `raphaelin`），SM8150，A-only | `ak3/anykernel.sh` 的 `device.name1/2`、`IS_SLOT_DEVICE=0` |
+| 内核源码 | `https://github.com/Evolution-X-Devices/kernel_xiaomi_raphael` 分支 `cnb` | 分支默认值；`Makefile` 里 `VERSION=4 PATCHLEVEL=14 SUBLEVEL=357` |
+| KernelSU | KernelSU **Next** `v3.4.0-legacy`（树内自带 `drivers/kernelsu`） | `drivers/kernelsu/Kbuild`：`KSU_GIT_VERSION := 3038`、`KSU_GIT_TAG := v3.4.0-legacy`，版本号 `30000+3038+289 = 33327` |
+| SUSFS | **不内置**，由 `patches/susfs/` 打进树（SUSFS **v2.1.0**，取自 SOVIET 16.0-SUSFS） | `patches/susfs/{10,11,12}-*.patch`，CI 断言 `CONFIG_KSU_SUSFS=y` |
+| 板级配置 | `vendor/sm8150-perf_defconfig` + `vendor/xiaomi/sm8150-common.config` + `vendor/xiaomi/raphael.config` | Evolution-X 设备树 `sm8150-common/BoardConfigCommon.mk:88-92`、`raphael/BoardConfig.mk:24` |
+| 镜像格式 | **未压缩 `Image`**（`CONFIG_BUILD_ARM64_UNCOMPRESSED_KERNEL=y`）+ `BOARD_INCLUDE_DTB_IN_BOOTIMG` | 同一 BoardConfig：`BOARD_KERNEL_IMAGE_NAME := Image` |
+| 工具链 | AOSP clang `clang-r547379`（crDroid prebuilt 镜像，可换） | `clang_tag` / `clang_branch` 输入 |
+| 打包 | `osm0sis/AnyKernel3` + 本仓库的 `ak3/anykernel.sh`（只刷 boot + 覆盖 `/vendor/lib/modules`） | 见第 4 节 |
+| 加速 | ccache（`actions/cache` 管 `.ccache`，上限 2G） | 见第 5 节 |
 
-上游同款构建命令（本流水线保持一致）：
-
-```bash
-make LLVM=1 LLVM_IAS=1 CC="ccache clang" raphael_defconfig
-make LLVM=1 LLVM_IAS=1 CC="ccache clang" -j$(nproc)
-```
-
-## 2. 两种用法
-
-### A. 直接放进内核仓库（最简单）
-
-把 `.github/workflows/build-raphael.yml` 提交到你的 K20 Pro 内核仓库（例如 Soviet 树的分支），
-然后 Actions → **Build Kernel · raphael** → Run workflow，**`kernel_repo` 留空**即可构建当前仓库。
-
-### B. 独立 builder 仓库（本目录的形态）
-
-本目录就是一个 builder 仓库：workflow 只放流水线，构建时去 clone 内核源码。
+构建命令等价于：
 
 ```bash
-git init kernel-raphael-gha && cd kernel-raphael-gha
-cp -r /path/to/this/repo/. .
-git add -A && git commit -m "ci: raphael kernel build"
-git remote add origin git@github.com:<你的用户名>/kernel-raphael-gha.git
-git push -u origin main
+make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 vendor/sm8150-perf_defconfig
+# 合入 sm8150-common.config / raphael.config，打开 CONFIG_KSU(+SUSFS)，olddefconfig
+make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 CC="ccache clang" -j$(nproc) Image modules
+make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 INSTALL_MOD_PATH=modout INSTALL_MOD_STRIP=1 modules_install
 ```
 
-触发时填 `kernel_repo`（如 `https://github.com/SOVIET-ANDROID/kernel_xiaomi_raphael`）与 `kernel_branch`（`16.0-SUSFS`）。
+## 1. 两条 CI 与文件分工
 
-### 选哪个源码分支
+```
+.github/workflows/
+  build-evolutionx.yml   # 可复用引擎：workflow_call + workflow_dispatch（所有构建逻辑在这里）
+  ci-susfs.yml           # 入口：flavor=susfs   -> KernelSU Next + SUSFS
+  ci-ksunext.yml         # 入口：flavor=ksunext -> 只有 KernelSU Next
+ak3/anykernel.sh         # 打包时覆盖到 AnyKernel3 仓库里的 anykernel.sh（devicecheck/BLOCK/do.modules）
+patches/susfs/           # SUSFS v2.1.0 内核代码 + VFS 钩子 + KSU Next 驱动胶水（10/11/12 号）
+patches/legacy-a11/      # 历史存档：PixelExperience eleven（4.14.190）那套 01-08 补丁，CI 不再使用
+```
 
-| 你的 ROM | 分支 | 说明 |
-|---|---|---|
-| Android 16 类原生（Soviet Star 等） | `16.0-SUSFS` | 默认值，4.14.357，KSU-Next + SUSFS 都在树里 |
-| Android 15 类原生 | `15-susfs` | 4.14.353，同样已集成 |
-| 只想要原版内核 | `16.0` / `15.0` | 把 `ksu_enable` 设为 `false` |
-| LineageOS 官方 22.2 / 23.2 | `lineage-22.2` / `lineage-23.2` | 不带 KSU/SUSFS，且原版 4.14 不支持 `LLVM=1`，需要自己改 make 参数 |
+触发方式：
 
-内核必须和 ROM 的 vendor 分区配套，跨 ROM 刷会不开机或没 Wi-Fi（见第 6 节）。
+- **自动**：推到 `main` 时，改了引擎 / 入口 / `patches/susfs/**` / `ak3/**` 会分别触发对应 CI（两个入口的 `paths` 各自独立）。
+- **手动单跑**：Actions → `CI - SUSFS` / `CI - KernelSU Next` → Run workflow。
+- **手动挑 flavor**：Actions → `build-evolutionx` → Run workflow，`flavor` 选 `susfs` 或 `ksunext`，还能改 `kernel_ref` / `defconfig` / `fragments` / `clang_tag` 等。
 
-## 3. 输入参数
+产物：Actions run 的 artifact，名字形如 `raphael-evox-susfs-4.14.357-<commit8>-<UTC 时间>.zip`。
+
+## 2. 输入参数（引擎 `build-evolutionx.yml`）
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `kernel_repo` | 空 | 留空 = 构建本仓库；填 URL = clone 该仓库 |
-| `kernel_branch` | `16.0-SUSFS` | 仅在填了 `kernel_repo` 时生效 |
-| `defconfig` | `raphael_defconfig` | 支持 `arch/arm64/configs/vendor/xxx_defconfig` 子目录写法 |
-| `localversion` | 空 | 覆盖 `CONFIG_LOCALVERSION`，例如 `SOVIET-STAR`；留空保持源码默认 |
-| `ksu_enable` | `true` | 关掉则 `CONFIG_KSU` 置 n；树里必须有 `drivers/kernelsu`，否则直接报错 |
-| `susfs_enable` | `true` | 关掉则 `CONFIG_KSU_SUSFS*` 全部置 n |
-| `hook_mode` | `manual` | **4.14 必须 manual**；`kprobe` 只给 5.10+ 的树用 |
-| `ccache_enable` | `true` | 关掉后直接用 clang，不挂 ccache |
-| `release` | `false` | 构建成功后发 GitHub Release（tag 自动用 `raphael-<run_number>`；需要 `contents: write`，workflow 里已声明） |
-| `boot_img_url` | 空 | 你 ROM 里 `boot.img` 的直链；给了就额外产出可 `fastboot` 刷的 `boot-*.img`（见 4.5） |
+| `flavor` | 必填（手动时可选 `susfs` / `ksunext`） | 决定是否打 `patches/susfs/*.patch`、是否打开 `CONFIG_KSU_SUSFS*` |
+| `kernel_repo` | `https://github.com/Evolution-X-Devices/kernel_xiaomi_raphael` | 内核源码仓库 |
+| `kernel_ref` | `cnb` | 4.14.357。想要 4.14.353 可以填 `15.0`（注意：那是 4.14.353，KSU/板级配置要自己核对） |
+| `defconfig` | `vendor/sm8150-perf_defconfig` | 相对 `arch/arm64/configs` |
+| `fragments` | `vendor/xiaomi/sm8150-common.config vendor/xiaomi/raphael.config` | 空格分隔，`merge_config.sh -m` 合入 |
+| `localversion` | 空 | 留空 = 保持树的 `-perf`。**改动会让内核 release 变化**，一般不要动（见第 4 节） |
+| `clang_tag` | `clang-r547379` | 换 clang 时改这个（比如 `clang-r522817`） |
+| `clang_branch` | `15.0` | crDroid prebuilt 镜像的分支 |
+| `ccache_enable` | `true` | 关掉直接用 clang |
+| `release` | `false` | 构建成功后发 Release（tag `raphael-<flavor>-<run_number>`） |
 
-另外：仓库根目录或 `kernel/` 下若有 `patches/*.patch`，会在编译前按文件名顺序 `patch -p1` 打进源码。
+## 3. 构建流程（引擎里每一步在干什么）
 
-## 4. ccache 说明
+1. **Checkout builder**：本仓库进 `builder/`（补丁与 `ak3/anykernel.sh` 从这里取）。
+2. **Free disk space + 装依赖**：删掉 runner 自带的大体积 SDK，装 `bc bison ccache cpio kmod libelf-dev libncurses-dev libssl-dev ...`。
+3. **clang**：`actions/cache` 缓存 `toolchain/<clang_tag>`，未命中就从 `gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_<tag>` 拉（`rm -rf .git` 后进 cache）。
+4. **ccache**：`actions/cache` 管 `.ccache`（key 带 flavor + defconfig），并用 `-Wno-error=...` 一串 KCFLAGS 压住 4.14 老代码在新 clang 下的告警（techpack 的 Kbuild 里写死了 `-Werror`）。
+5. **clone 内核源码**：`git clone --depth=1 -b cnb ...`，打印 `KERNEL_VERSION` / commit，并断言 `arch/arm64/configs/vendor/sm8150-perf_defconfig` 与 `drivers/kernelsu/Kconfig` 存在。
+6. **打补丁（仅 susfs flavor）**：按文件名顺序 `patch -p1 --fuzz=3` 套 `patches/susfs/*.patch`，然后逐项断言（`fs/susfs.c`、`fs/Makefile` 的 `CONFIG_KSU_SUSFS`、`Kconfig` 的 `config KSU_SUSFS`、`supercall.c` 的 `SUSFS_MAGIC`、`selinux.c` 的 `susfs_is_current_ksu_domain`、`core/init.c` 的 `susfs_init`）。ksunext flavor 反过来断言树里**没有** SUSFS。
+7. **配置**：defconfig → merge fragments → `scripts/config` 打开 `KSU` + `KSU_MANUAL_HOOK`、关掉 `KSU_KPROBES_HOOK`/`KSU_SYSCALL_TABLE_HOOK` → susfs flavor 再自动把 `Kconfig` 里所有 `KSU_SUSFS*` 选项全开 → `olddefconfig` → 断言 `CONFIG_KSU=y`、`CONFIG_KSU_MANUAL_HOOK=y`、`CONFIG_THREAD_INFO_IN_TASK=y`、（susfs）`CONFIG_KSU_SUSFS=y`。
+8. **编译**：`make ... Image modules`（注意 Evolution-X 要的是未压缩 `Image`，不是 `Image.gz-dtb`）。
+9. **模块**：`modules_install` 到 `modout/`，再把 `.ko` 摊平成 `modflat/`（设备上的 `/vendor/lib/modules` 是平铺的）。
+10. **打包**：clone `osm0sis/AnyKernel3`，覆盖 `ak3/anykernel.sh`，放 `Image` 与 `modules/vendor/lib/modules/*.ko`，`zip -r9` 出包并上传 artifact。
 
-- 缓存 key：`ccache-raphael-<defconfig>-<branch>-<commit>`，restore 前缀两级回退，跨 commit 也能命中。
-- 上限 `2G`（`max-size`），命中率在 job 的 **ccache statistics** 步骤与 Summary 里都能看到。
-- 稳定性设置：`CCACHE_COMPILERCHECK=string:clang-r547379`、`CCACHE_NOHASHDIR=true`、`CCACHE_HARDLINK=true`。
-- 上游同一套配置的实测：`SOVIET-ANDROID/kernel_xiaomi_raphael` 的 CI job 稳定在 15–16 分钟（ccache 持续命中）；空缓存首次大约 45–70 分钟。
-- 换 defconfig / 换分支 / 升级内核大版本后，建议在 Actions → Caches 里删掉 `ccache-raphael-*` 再跑，避免失效对象占额度。
+## 4. 为什么 zip 里还要带模块（重要）
 
-## 4.5 boot.img：额外产出一个可 fastboot 刷的内核镜像
+只刷 boot 分区**不会**更新 `/vendor/lib/modules`，而模块加载要过两道闸：
 
-AK3 zip 只能在 recovery 里刷。要用 fastboot 直接刷，就得有 **boot.img**——而 boot.img 不可能凭空生成：
+- **vermagic**：模块里编着内核 release 串。这棵树 `CONFIG_LOCALVERSION_AUTO=y`，ROM 编出来的 release 是 `4.14.357-perf-g<hash>`，我们的构建只要 git 状态不同，hash 就不一样 → 模块被拒。
+- **`CONFIG_MODULE_SIG_FORCE=y`**：模块必须由内核信任的 key 签名，我们自签的模块只有配我们自己的内核才行。
 
-| 组成 | 来源 |
-|---|---|
-| kernel | 本次编译的 `Image.gz-dtb` |
-| ramdisk | **你 ROM 的 boot.img**（里面是 init、fstab、vendor 相关的第一段用户态） |
-| cmdline / 偏移 / dtb / header 版本 | **你 ROM 的 boot.img** 的 boot header |
+所以：内核和模块必须**同一次构建、一起刷**。CI 用 `INSTALL_MOD_STRIP=1 modules_install` 收集本次的 `.ko`，打进 `modules/vendor/lib/modules/`，`anykernel.sh` 里 `do.modules=1`、`do.systemless=0`，刷机时把 `.ko` 覆盖到 `/vendor/lib/modules`（AK3 会自己 remount rw 并修 SELinux 标签）。
 
-所以流水线做的是「用你的 boot.img 当底包，只把 kernel 换掉再重打包」，ramdisk 和 cmdline 一个字节都不动。
+如果 `/vendor` 写不进去（例如只在 KernelSU 管理器里刷 zip、没有 recovery），把 `ak3/anykernel.sh` 改成 `do.systemless=1`：AK3 会把这批模块做成一个 `ak3-helper` 的 KernelSU/Magisk 模块做 bind-mount 覆盖（前提是设备上已装 KSU/Magisk 管理器）。
 
-**给底包的方式（二选一）**：
+**结论：不要单独拿一个 `Image` 去换 ROM 里的内核，也不要只刷 zip 里的 boot 部分。**
 
-1. 触发时填 `boot_img_url`：你 ROM zip 里那个 `boot.img` 的直链，**或者直接给 ROM zip 的直链**（会自动从包里取出 `boot.img`）。GitHub Release / 网盘直链都行，要能 `curl -L` 下。
-2. 把文件放到仓库的 `donors/boot.img` 提交进去（workflow 会自动用）。
+## 5. 刷写与回滚
 
-两个都没给时这一步整体跳过，只出 AK3 zip。
+raphael 是 A-only、无 `_a/_b`，boot header v2，dtb 在 boot.img 里、dtbo 单独一个分区：
 
-**产物**：上传的 artifact 是一个 `dist/` 目录，里面
-
-- `raphael-<branch>-<ver>-<commit>-<time>.zip` —— AnyKernel3 包（recovery 刷）
-- `boot-<ver>-<commit>-<time>.img` —— 可 fastboot 刷的 boot.img（只有给了底包才有）
-
-**刷写**（raphael 是 A-only，没有 `_a`/`_b` 槽位后缀）：
-
-```bash
-fastboot flash boot boot-4.14.357-xxxx-20261115-2140.img
-# 需要换 dtbo（比如新内核配了新的 dts）时，dtbo 不在这张 boot.img 里：
-fastboot flash dtbo dtbo.img
-fastboot reboot
-```
-
-**小米 4.14 机型的 kernel 容器格式（重要）**：
-
-raphael 的 MIUI boot.img 里 kernel 不是原样的 `Image.gz-dtb`，而是小米的 `UNCOMPRESSED_IMG` 容器：
-
-```
-16 字节 "UNCOMPRESSED_IMG" | u32 LE（Image 长度）| 未压缩 Image | dtb
-```
-
-实测 MIUI 12.5.6.0.RFKCNXM 的 boot.img：header v1、**ramdisk size = 0**（system-as-root）、kernel chunk 43,958,745 字节，其中 Image 41,963,536 + dtb 1,995,189。
-
-流水线会自动识别：底包是这种容器就把 `Image.gz-dtb` 解压成 Image、拼回同格式的容器；不是就原样塞进去。重打包后会再解包断言 `kernel_size` 等于我们的内核大小，防止「内核根本没换进去」（这个 bug 真实踩过一次：取 mkbootimg 参数的那次 unpack 会把刚写进去的内核覆盖回底包的）。
-
-**注意**：
-
-- 重打包出来的 boot.img **没有 AVB 签名**。设备若在 `fastboot flash` 后校验失败不开机，用你 ROM 里的 vbmeta 关一次校验：`fastboot --disable-verity --disable-verification flash vbmeta vbmeta.img`（这一步只需一次）。
-- 底包必须和你要刷的 ROM 是同一版本，换了 ROM 就要换底包重打包，否则 ramdisk 与系统不对应。
-- 有自定义 recovery 时，AK3 zip 更省事（它还会顺带处理 dtbo）；boot.img 是给「只有 fastboot」的场景用的。
-
-## 5. 为什么 4.14 必须用 manual hook
-
-树里的 `drivers/kernelsu/Kconfig` 写得很清楚：
-
-```
-config KSU_KPROBES_HOOK
-    bool "KernelSU tracepoint+kretprobe hook"
-    ...
-    help
-      ... This should not be used on kernel below 5.10.
-```
-
-而 `KSU_MANUAL_HOOK` 的默认值只在 `!KPROBES` 时才为 y。K20 Pro 的 defconfig 里 KPROBES 是否打开并不由我们控制，
-所以流水线显式写 `CONFIG_KSU_MANUAL_HOOK=y` + `CONFIG_KSU_KPROBES_HOOK=n`，并在 `olddefconfig` 之后断言它真的生效。
-对应的手工 hook 代码在这个源码树里已经打好：
-
-```
-fs/exec.c:1926        ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
-fs/open.c:382         ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
-fs/read_write.c:584   ksu_handle_sys_read(fd, &buf, &count);
-```
+- zip **只动两处**：`boot` 分区的 kernel（换成我们的 `Image`）与 `/vendor/lib/modules/*.ko`。
+- **不动 dtbo**：`anykernel.sh` 里没有 `flash_dtbo`，`BOARD_INCLUDE_DTB_IN_BOOTIMG` 让 dtb 跟着 boot header 走，沿用 ROM 自带的即可。
+- 刷法：TWRP / OrangeFox → 安装 zip → 重启。首次开机会比较久（模块与 KSU 初始化）。
+- 回滚：刷 ROM 原包里的 `boot.img`（或者重刷 ROM 全量包）就能回到原内核；再进 `/vendor/lib/modules` 换回原模块（重刷 ROM 全量包最快）。
+- KernelSU 管理器：内核是 **KernelSU Next v3.4.0-legacy**（版本号 33327，构建日志里 `-- KernelSU-Next version: 33327`），管理器装 `KernelSU-Next` 对应 `v3.4.0-legacy` 的 APK。
 
 ## 6. 常见问题
 
-**`CONFIG_KSU_SUSFS` 没有生效**：先看日志里打印的 `CONFIG_THREAD_INFO_IN_TASK`。`KSU_SUSFS` 在 Kconfig 里 `depends on THREAD_INFO_IN_TASK`，
-arm64 的 4.14 在 `arch/arm64/Kconfig:159` 已经 `select THREAD_INFO_IN_TASK`，正常不会缺；缺了说明你换成了别的源码树。
+**`Image` 找不到 / 打出来的是 `Image.gz-dtb`**：Evolution-X 的 `BOARD_KERNEL_IMAGE_NAME := Image`（`CONFIG_BUILD_ARM64_UNCOMPRESSED_KERNEL=y`），`Image` 才是对的；`Image.gz-dtb` 是 SOVIET 那套树的格式，别混。
 
-**`该源码树没有内置 KernelSU Next`**：本流水线不负责把 KSU 打进普通内核树（KSU-Next 对非 GKI 只保留内置 driver 形态，SUSFS 还需要内核侧代码）。
-换用 `16.0-SUSFS` / `15-susfs` 这类已集成的树，或把 `ksu_enable` 设为 false 只编原版内核。
+**susfs flavor 报「树里没有 KSU_SUSFS」**：说明补丁没套上（看前一步 `patch` 的 `Hunk FAILED`）。补丁是针对 `cnb`（4.14.357）做的，换 `kernel_ref` 到 `15.0` 之类要重新做补丁。
 
-**`LLVM=1` 编不过 / 找不到 `ld.lld`**：`LLVM=1` 需要源码树支持（Soviet 树 backport 过），原版 LineageOS 4.14 树不支持。
-这类树要把 make 参数改成 `CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu-` 并自己装 binutils。
+**`CONFIG_KSU_SUSFS` 没生效**：`KSU_SUSFS` 在 Kconfig 里 `depends on KSU && THREAD_INFO_IN_TASK`。这棵树 `arch/arm64/Kconfig:153` 已 `select THREAD_INFO_IN_TASK`，正常不会缺；缺了就是源码被换过。
 
-**刷完开不了机 / 没 Wi-Fi**：内核必须和 ROM 的 vendor 分区匹配。K20 Pro 的 vendor 模块（wlan 等）是按原厂内核 vermagic 编的，
-换了内核版本串（`CONFIG_LOCALVERSION`）后模块可能拒绝加载；要么用与 ROM 配套的内核树，要么把模块一起重编进包。
+**clang 版本不合**：`clang-r547379` 是 AOSP clang 19；4.14 老代码在更高版本上可能报新的 error（我们只用 `-Wno-error=...` 压告警，压不住真错误）。换 `clang_tag`（如 `clang-r522817` / `clang-r487747c`）与对应 `clang_branch` 试。
 
-**构建超时**：`timeout-minutes: 180`。4 核 + 空缓存 + 全量 LTO 偶尔会顶到 90 分钟以上，属正常。
+**ccache 命中率低**：key 是 `ccache-<flavor>-<defconfig>-<sha>`，restore 前缀按 `flavor + defconfig` 回退；换 defconfig / 换 `clang_tag` / 换 `kernel_ref` 后会重新建缓存。要清理就去 Actions → Caches 删 `ccache-*`。
+
+**构建超时**：`timeout-minutes: 300`。空缓存 + LTO 首次通常 60–100 分钟；ccache 命中后 15–25 分钟。
+
+**刷完没 Wi-Fi / 模块加载失败**：几乎一定是「内核与模块不是同一次构建」——检查 zip 里 `modules/vendor/lib/modules/` 是否有本次的 `.ko`，以及刷机日志里 `do_modules` 有没有真的把这些文件 push 进 `/vendor/lib/modules`。
 
 ## 7. 本仓库做过的静态校验（没有在本机编译）
 
 ```
-$ python3 -c "import yaml; yaml.safe_load(open('.github/workflows/build-raphael.yml'))"
-yaml: OK, steps=19, run_blocks=13, bash_n_failures=0
-$ actionlint .github/workflows/build-raphael.yml   # v1.7.7
-(无输出，exit 0)
-$ grep -nE "TODO|FIXME|<soc>|<branch>|占位" .github/workflows/build-raphael.yml
-(空)
+$ python3 -c "import yaml; ..."            # 三个 workflow 都能 yaml.safe_load
+bash -n                                    # 引擎里 15 个 run 块全部通过
+patch -p1 --dry-run                        # patches/susfs 三个补丁在 cnb 的 20 个受影响文件上 rc=0（无 fuzz 报错）
+make ARCH=arm64 O=... vendor/sm8150-perf_defconfig + merge_config + scripts/config + olddefconfig
+#   -> CONFIG_KSU=y / CONFIG_KSU_MANUAL_HOOK=y / CONFIG_KSU_SUSFS=y / CONFIG_THREAD_INFO_IN_TASK=y
 ```
 
-也就是说：YAML 解析、GitHub Actions 表达式/上下文校验、13 个 `run:` 块的 `bash -n` 全部通过；
-构建命令本身来自上游仓库自己的 CI（`SOVIET-ANDROID/kernel_xiaomi_raphael` 的 Actions 里 `16.0-SUSFS` 分支最近 10 次运行全部成功，单 job 15–16 分钟）。
-**本机没有跑过一次真实编译**，第一次在 GitHub 上跑仍建议先按默认参数验证。
-
-事实来源都在 GitHub / GitLab 上可复核：`SOVIET-ANDROID/kernel_xiaomi_raphael` 的 `16.0-SUSFS` 分支、`SOVIET-ANDROID/AnyKernel3`、
-`KernelSU-Next/KernelSU-Next`、`simonpunk/susfs4ksu`（GitLab）与 crDroid 的 clang r547379 镜像。
-
+事实来源可复核：`Evolution-X-Devices/kernel_xiaomi_raphael@cnb`、`Evolution-X-Devices/device_xiaomi_raphael@cnb`、
+`KernelSU-Next/KernelSU-Next`（legacy 分支）、`SOVIET-ANDROID/kernel_xiaomi_raphael@16.0-SUSFS`（SUSFS v2.1.0 来源）、
+`osm0sis/AnyKernel3`、crDroid 的 clang prebuilt 镜像。
