@@ -182,7 +182,7 @@ jobs:
           key: ${{ inputs.clang_tag }}-v2
 
       - name: Download clang
-        if: steps.clang-cache.outputs.cache-hit != "true"
+        if: steps.clang-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           mkdir -p "$(dirname "$TOOLCHAIN_DIR")"
@@ -192,7 +192,7 @@ jobs:
           rm -rf "$TOOLCHAIN_DIR/.git"
 
       - name: Save clang cache
-        if: steps.clang-cache.outputs.cache-hit != "true"
+        if: steps.clang-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
@@ -259,7 +259,7 @@ jobs:
 
       # ---------------------------------------------------------------- 补丁
       - name: Apply SUSFS patches
-        if: inputs.flavor == "susfs"
+        if: inputs.flavor == 'susfs'
         run: |
           set -euo pipefail
           cd kernel
@@ -281,7 +281,7 @@ jobs:
           echo "SUSFS patch set applied"
 
       - name: Assert SUSFS absent on ksunext flavor
-        if: inputs.flavor != "susfs"
+        if: inputs.flavor != 'susfs'
         run: |
           set -euo pipefail
           cd kernel
