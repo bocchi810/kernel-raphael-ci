@@ -314,7 +314,7 @@ jobs:
           ./scripts/config --file out/.config -d KSU_KPROBES_HOOK
           ./scripts/config --file out/.config -d KSU_SYSCALL_TABLE_HOOK
 
-          SUSFS_OPTS=$(grep -E "^[[:space:]]*config[[:space:]]+KSU_SUSFS" drivers/kernelsu/Kconfig | sed -E "s/^[[:space:]]*config[[:space:]]+//" | sort -u)
+          SUSFS_OPTS=$(grep -E "^[[:space:]]*config[[:space:]]+KSU_SUSFS" drivers/kernelsu/Kconfig | sed -E "s/^[[:space:]]*config[[:space:]]+//" | sort -u || true)
           echo "SUSFS options in tree: ${SUSFS_OPTS:-none}"
           if [ "$FLAVOR" = "susfs" ]; then
             [ -n "$SUSFS_OPTS" ] || { echo "::error::susfs flavor 但 Kconfig 里没有 KSU_SUSFS"; exit 1; }
@@ -447,5 +447,5 @@ jobs:
             echo "| AK3 zip | ${{ steps.package.outputs.ZIP_NAME }} |"
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "${{ inputs.ccache_enable }}" = "true" ]; then
-            { echo ""; echo "<details><summary>ccache stats</summary>"; echo ""; echo "```"; ccache --show-stats || true; echo "```"; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
+            { echo ""; echo "<details><summary>ccache stats</summary>"; echo ""; ccache --show-stats || true; echo "</details>"; } >> "$GITHUB_STEP_SUMMARY"
           fi
