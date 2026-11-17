@@ -278,6 +278,7 @@ jobs:
           grep -q SUSFS_MAGIC drivers/kernelsu/supercall/supercall.c
           grep -q susfs_is_current_ksu_domain drivers/kernelsu/selinux/selinux.c
           grep -q susfs_init drivers/kernelsu/core/init.c
+          grep -q CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS kernel/kallsyms.c
           echo "SUSFS patch set applied"
 
       - name: Assert SUSFS absent on ksunext flavor

@@ -12,7 +12,7 @@
 | 机型 | Redmi K20 Pro / Mi 9T Pro（`raphael` / `raphaelin`），SM8150，A-only | `ak3/anykernel.sh` 的 `device.name1/2`、`IS_SLOT_DEVICE=0` |
 | 内核源码 | `https://github.com/Evolution-X-Devices/kernel_xiaomi_raphael` 分支 `cnb` | 分支默认值；`Makefile` 里 `VERSION=4 PATCHLEVEL=14 SUBLEVEL=357` |
 | KernelSU | KernelSU **Next** `v3.4.0-legacy`（树内自带 `drivers/kernelsu`） | `drivers/kernelsu/Kbuild`：`KSU_GIT_VERSION := 3038`、`KSU_GIT_TAG := v3.4.0-legacy`，版本号 `30000+3038+289 = 33327` |
-| SUSFS | **不内置**，由 `patches/susfs/` 打进树（SUSFS **v2.1.0**，取自 SOVIET 16.0-SUSFS） | `patches/susfs/{10,11,12}-*.patch`，CI 断言 `CONFIG_KSU_SUSFS=y` |
+| SUSFS | **不内置**，由 `patches/susfs/` 打进树（SUSFS **v2.1.0**，取自 SOVIET 16.0-SUSFS） | `patches/susfs/{10,11,12,13}-*.patch`，CI 断言 `CONFIG_KSU_SUSFS=y` |
 | 板级配置 | `vendor/sm8150-perf_defconfig` + `vendor/xiaomi/sm8150-common.config` + `vendor/xiaomi/raphael.config` | Evolution-X 设备树 `sm8150-common/BoardConfigCommon.mk:88-92`、`raphael/BoardConfig.mk:24` |
 | 镜像格式 | **未压缩 `Image`**（`CONFIG_BUILD_ARM64_UNCOMPRESSED_KERNEL=y`）+ `BOARD_INCLUDE_DTB_IN_BOOTIMG` | 同一 BoardConfig：`BOARD_KERNEL_IMAGE_NAME := Image` |
 | 工具链 | AOSP clang `clang-r547379`（crDroid prebuilt 镜像，可换） | `clang_tag` / `clang_branch` 输入 |
