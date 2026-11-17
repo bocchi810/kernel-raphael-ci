@@ -12,7 +12,14 @@ Evolution-X 的 cnb 内核树**自带** drivers/kernelsu（KernelSU-Next v3.4.0-
 |---|---|---|
 | `10-susfs-core.patch` | 放入 SUSFS 内核实现本体 | 新增 `fs/susfs.c`、`include/linux/susfs.h`、`include/linux/susfs_def.h`；`fs/Makefile` 加 `obj-$(CONFIG_KSU_SUSFS) += susfs.o` |
 | `11-susfs-vfs-hooks.patch` | 在 VFS 各路入口插 SUSFS 钩子 | `fs/open.c`、`fs/stat.c`、`fs/namei.c`、`fs/namespace.c`、`fs/readdir.c`、`fs/statfs.c`、`fs/notify/fdinfo.c`、`fs/proc/{base,task_mmu,cmdline,fd}.c`、`fs/proc_namespace.c`、`include/linux/sched.h`、`include/linux/mount.h` |
-| `12-susfs-ksu-driver.patch` | 给树内 KSU Next v3.4 驱动补胶水 | `drivers/kernelsu/Kconfig`（新增 `KSU_SUSFS*` 菜单）、`selinux/selinux.c`（`susfs_is_current_ksu_domain()`）、`core/init.c`（`susfs_init()`）、`supercall/dispatch.c`（boot completed 后 `susfs_start_sdcard_monitor_fn()`）、`supercall/supercall.c`（`ksu_handle_sys_reboot` 里按 `SUSFS_MAGIC` 分发 `CMD_SUSFS_*`） |
+| `12-susfs-ksu-driver.patch` | 给树内 KSU Next v3.4 驱动补胶水 | `drivers/kernelsu/Kconfig`（新增 `KSU_SUSFS*` 菜单，**不含** `KSU_SUSFS_TRY_UMOUNT`）、`selinux/selinux.c`（`susfs_is_current_ksu_domain()`，外加 `susfs_is_avc_log_spoofing_enabled` 符号兜底）、`core/init.c`（`susfs_init()`）、`supercall/dispatch.c`（boot completed 后 `susfs_start_sdcard_monitor_fn()`）、`supercall/supercall.c`（`ksu_handle_sys_reboot` 里按 `SUSFS_MAGIC` 分发 `CMD_SUSFS_*`） |
+
+### 两项「登记了但没实现」的功能（自己心里有数，别在设备上踩坑）
+
+| 功能 | 现状 | 原因 |
+|---|---|---|
+| `CMD_SUSFS_ADD_TRY_UMOUNT`（SUSFS 版 umount 列表） | 未启用；`ksu_susfs add_try_umount` 被 `supercall.c` 的 `#ifdef` 拦掉，落到未知命令返回 `-EINVAL` | 这棵树的 `try_umount()` 是 `drivers/kernelsu/feature/kernel_umount.c:82` 里的 **static** 函数，`fs/susfs.c` 链接不到它；SOVIET 的做法是把它改成全局**并且整块编掉** KSU 自己的 `umount_tw_func`/`ksu_handle_umount`，与 KSU Next v3.4 的 setuid hook 强耦合，代价大。所以直接把 `KSU_SUSFS_TRY_UMOUNT` 从 Kconfig 菜单里删掉，编译期让 `fs/susfs.c` 那段 `#ifdef` 整段消失（否则 vmlinux 链接报 `undefined symbol: try_umount`） |
+| `CMD_SUSFS_SET_AVC_LOG_SPOOFING`（伪造 avc denied 日志） | 命令能设，但**没有任何内核钩子消费**，等于不生效；`susfs_get_enabled_features` 也不宣称支持它 | 真正实现在 `security/selinux/avc.c` 的 `avc_log()` 里（把 `tsid == susfs_ksu_sid` 的 tcontext 改写成 priv_app），还依赖 `susfs_ksu_sid`/`susfs_priv_app_sid` 两个 SID 变量 —— KSU Next v3.4 不提供，需要自己在 selinux 初始化里算；这里只补了 `bool susfs_is_avc_log_spoofing_enabled` 定义兜住链接 |
 
 应用顺序必须是 10 → 11 → 12（workflow 里用 glob 按文件名排序，`patches/susfs/*.patch`，数字前缀保证顺序）。
 套完之后 CI 会断言：`fs/susfs.c` / `include/linux/susfs.h` / `fs/Makefile` 里的 `CONFIG_KSU_SUSFS` /
