@@ -3,7 +3,7 @@
 > 内核源码换成 `Evolution-X-Devices/kernel_xiaomi_raphael`（默认分支 `cnb`，Linux **4.14.357-openela**），
 > 产出 **AnyKernel3 直刷 zip**（未压缩 `Image` + 本次编译的 vendor 模块）。**不再产出 boot.img。**
 >
-> 两条独立 CI：**CI - SUSFS**（KernelSU Next + SUSFS v2.1.0）与 **CI - KernelSU Next**（只有 KSU Next）。
+> 一条 CI，**一个包**：内核里同时编进 **KernelSU Next v3.4.0-legacy** 与 **SUSFS v2.1.0**，刷一次两样都有。
 
 ## 0. 这套流水线实际在编什么
 
@@ -28,31 +28,30 @@ make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 CC="ccache clang" -j$(nproc) Image modul
 make LLVM=1 LLVM_IAS=1 O=out ARCH=arm64 INSTALL_MOD_PATH=modout INSTALL_MOD_STRIP=1 modules_install
 ```
 
-## 1. 两条 CI 与文件分工
+## 1. CI 与文件分工
 
 ```
 .github/workflows/
   build-evolutionx.yml   # 可复用引擎：workflow_call + workflow_dispatch（所有构建逻辑在这里）
-  ci-susfs.yml           # 入口：flavor=susfs   -> KernelSU Next + SUSFS
-  ci-ksunext.yml         # 入口：flavor=ksunext -> 只有 KernelSU Next
+  ci-build.yml           # 入口：KernelSU Next + SUSFS（唯一产物）
 ak3/anykernel.sh         # 打包时覆盖到 AnyKernel3 仓库里的 anykernel.sh（devicecheck/BLOCK/do.modules）
-patches/susfs/           # SUSFS v2.1.0 内核代码 + VFS 钩子 + KSU Next 驱动胶水（10/11/12 号）
+patches/susfs/           # SUSFS v2.1.0 内核代码 + VFS 钩子 + KSU Next 驱动胶水 + kallsyms 隐藏（10/11/12/13 号）
 patches/legacy-a11/      # 历史存档：PixelExperience eleven（4.14.190）那套 01-08 补丁，CI 不再使用
 ```
 
 触发方式：
 
-- **自动**：推到 `main` 时，改了引擎 / 入口 / `patches/susfs/**` / `ak3/**` 会分别触发对应 CI（两个入口的 `paths` 各自独立）。
-- **手动单跑**：Actions → `CI - SUSFS` / `CI - KernelSU Next` → Run workflow。
-- **手动挑 flavor**：Actions → `build-evolutionx` → Run workflow，`flavor` 选 `susfs` 或 `ksunext`，还能改 `kernel_ref` / `defconfig` / `fragments` / `clang_tag` 等。
+- **自动**：推到 `main` 时，改了引擎 / 入口 / `patches/susfs/**` / `ak3/**` 触发这条 CI。
+- **手动单跑**：Actions → `CI - Kernel (KSU Next + SUSFS)` → Run workflow。
+- **手动改参数**：Actions → `build-evolutionx` → Run workflow，可改 `kernel_ref` / `defconfig` / `fragments` / `clang_tag` 等。
 
-产物：Actions run 的 artifact，名字形如 `raphael-evox-susfs-4.14.357-<commit8>-<UTC 时间>.zip`。
+产物：Actions run 的 artifact，名字形如 `raphael-evox-ksu-susfs-4.14.357-<commit8>-<UTC 时间>.zip`，
+里面是**一个**内核（KernelSU Next + SUSFS 同时编入），不是两个包。
 
 ## 2. 输入参数（引擎 `build-evolutionx.yml`）
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `flavor` | 必填（手动时可选 `susfs` / `ksunext`） | 决定是否打 `patches/susfs/*.patch`、是否打开 `CONFIG_KSU_SUSFS*` |
 | `kernel_repo` | `https://github.com/Evolution-X-Devices/kernel_xiaomi_raphael` | 内核源码仓库 |
 | `kernel_ref` | `cnb` | 4.14.357。想要 4.14.353 可以填 `15.0`（注意：那是 4.14.353，KSU/板级配置要自己核对） |
 | `defconfig` | `vendor/sm8150-perf_defconfig` | 相对 `arch/arm64/configs` |
@@ -61,17 +60,17 @@ patches/legacy-a11/      # 历史存档：PixelExperience eleven（4.14.190）�
 | `clang_tag` | `clang-r547379` | 换 clang 时改这个（比如 `clang-r522817`） |
 | `clang_branch` | `15.0` | crDroid prebuilt 镜像的分支 |
 | `ccache_enable` | `true` | 关掉直接用 clang |
-| `release` | `false` | 构建成功后发 Release（tag `raphael-<flavor>-<run_number>`） |
+| `release` | `false` | 构建成功后发 Release（tag `raphael-ksu-susfs-<run_number>`） |
 
 ## 3. 构建流程（引擎里每一步在干什么）
 
 1. **Checkout builder**：本仓库进 `builder/`（补丁与 `ak3/anykernel.sh` 从这里取）。
 2. **Free disk space + 装依赖**：删掉 runner 自带的大体积 SDK，装 `bc bison ccache cpio kmod libelf-dev libncurses-dev libssl-dev ...`。
 3. **clang**：`actions/cache` 缓存 `toolchain/<clang_tag>`，未命中就从 `gitlab.com/crdroidandroid/android_prebuilts_clang_host_linux-x86_<tag>` 拉（`rm -rf .git` 后进 cache）。
-4. **ccache**：`actions/cache` 管 `.ccache`（key 带 flavor + defconfig），并用 `-Wno-error=...` 一串 KCFLAGS 压住 4.14 老代码在新 clang 下的告警（techpack 的 Kbuild 里写死了 `-Werror`）。
+4. **ccache**：`actions/cache` 管 `.ccache`（key 带 `ksu-susfs` + defconfig），并用 `-Wno-error=...` 一串 KCFLAGS 压住 4.14 老代码在新 clang 下的告警（techpack 的 Kbuild 里写死了 `-Werror`）。
 5. **clone 内核源码**：`git clone --depth=1 -b cnb ...`，打印 `KERNEL_VERSION` / commit，并断言 `arch/arm64/configs/vendor/sm8150-perf_defconfig` 与 `drivers/kernelsu/Kconfig` 存在。
-6. **打补丁（仅 susfs flavor）**：按文件名顺序 `patch -p1 --fuzz=3` 套 `patches/susfs/*.patch`，然后逐项断言（`fs/susfs.c`、`fs/Makefile` 的 `CONFIG_KSU_SUSFS`、`Kconfig` 的 `config KSU_SUSFS`、`supercall.c` 的 `SUSFS_MAGIC`、`selinux.c` 的 `susfs_is_current_ksu_domain`、`core/init.c` 的 `susfs_init`）。ksunext flavor 反过来断言树里**没有** SUSFS。
-7. **配置**：defconfig → merge fragments → `scripts/config` 打开 `KSU` + `KSU_MANUAL_HOOK`、关掉 `KSU_KPROBES_HOOK`/`KSU_SYSCALL_TABLE_HOOK` → susfs flavor 再自动把 `Kconfig` 里所有 `KSU_SUSFS*` 选项全开 → `olddefconfig` → 断言 `CONFIG_KSU=y`、`CONFIG_KSU_MANUAL_HOOK=y`、`CONFIG_THREAD_INFO_IN_TASK=y`、（susfs）`CONFIG_KSU_SUSFS=y`。
+6. **打补丁**：按文件名顺序 `patch -p1 --fuzz=3` 套 `patches/susfs/*.patch`，然后逐项断言（`fs/susfs.c`、`fs/Makefile` 的 `CONFIG_KSU_SUSFS`、`Kconfig` 的 `config KSU_SUSFS`、`supercall.c` 的 `SUSFS_MAGIC`、`selinux.c` 的 `susfs_is_current_ksu_domain`、`core/init.c` 的 `susfs_init`、`kernel/kallsyms.c` 的 `CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS`）。
+7. **配置**：defconfig → merge fragments → `scripts/config` 打开 `KSU` + `KSU_MANUAL_HOOK`、关掉 `KSU_KPROBES_HOOK`/`KSU_SYSCALL_TABLE_HOOK` → 自动把 `Kconfig` 里所有 `KSU_SUSFS*` 选项全开 → `olddefconfig` → 断言 `CONFIG_KSU=y`、`CONFIG_KSU_MANUAL_HOOK=y`、`CONFIG_THREAD_INFO_IN_TASK=y`、`CONFIG_KSU_SUSFS=y`。
 8. **编译**：`make ... Image modules`（注意 Evolution-X 要的是未压缩 `Image`，不是 `Image.gz-dtb`）。
 9. **模块**：`modules_install` 到 `modout/`，再把 `.ko` 摊平成 `modflat/`（设备上的 `/vendor/lib/modules` 是平铺的）。
 10. **打包**：clone `osm0sis/AnyKernel3`，覆盖 `ak3/anykernel.sh`，放 `Image` 与 `modules/vendor/lib/modules/*.ko`，`zip -r9` 出包并上传 artifact。
@@ -103,13 +102,13 @@ raphael 是 A-only、无 `_a/_b`，boot header v2，dtb 在 boot.img 里、dtbo 
 
 **`Image` 找不到 / 打出来的是 `Image.gz-dtb`**：Evolution-X 的 `BOARD_KERNEL_IMAGE_NAME := Image`（`CONFIG_BUILD_ARM64_UNCOMPRESSED_KERNEL=y`），`Image` 才是对的；`Image.gz-dtb` 是 SOVIET 那套树的格式，别混。
 
-**susfs flavor 报「树里没有 KSU_SUSFS」**：说明补丁没套上（看前一步 `patch` 的 `Hunk FAILED`）。补丁是针对 `cnb`（4.14.357）做的，换 `kernel_ref` 到 `15.0` 之类要重新做补丁。
+**报「Kconfig 里没有 KSU_SUSFS」**：说明补丁没套上（看前一步 `patch` 的 `Hunk FAILED`）。补丁是针对 `cnb`（4.14.357）做的，换 `kernel_ref` 到 `15.0` 之类要重新做补丁。
 
 **`CONFIG_KSU_SUSFS` 没生效**：`KSU_SUSFS` 在 Kconfig 里 `depends on KSU && THREAD_INFO_IN_TASK`。这棵树 `arch/arm64/Kconfig:153` 已 `select THREAD_INFO_IN_TASK`，正常不会缺；缺了就是源码被换过。
 
 **clang 版本不合**：`clang-r547379` 是 AOSP clang 19；4.14 老代码在更高版本上可能报新的 error（我们只用 `-Wno-error=...` 压告警，压不住真错误）。换 `clang_tag`（如 `clang-r522817` / `clang-r487747c`）与对应 `clang_branch` 试。
 
-**ccache 命中率低**：key 是 `ccache-<flavor>-<defconfig>-<sha>`，restore 前缀按 `flavor + defconfig` 回退；换 defconfig / 换 `clang_tag` / 换 `kernel_ref` 后会重新建缓存。要清理就去 Actions → Caches 删 `ccache-*`。
+**ccache 命中率低**：key 是 `ccache-ksu-susfs-<defconfig>-<sha>`，restore 前缀按 `defconfig` 回退；换 defconfig / 换 `clang_tag` / 换 `kernel_ref` 后会重新建缓存。要清理就去 Actions → Caches 删 `ccache-*`。
 
 **构建超时**：`timeout-minutes: 300`。空缓存 + LTO 首次通常 60–100 分钟；ccache 命中后 15–25 分钟。
 
@@ -118,9 +117,9 @@ raphael 是 A-only、无 `_a/_b`，boot header v2，dtb 在 boot.img 里、dtbo 
 ## 7. 本仓库做过的静态校验（没有在本机编译）
 
 ```
-$ python3 -c "import yaml; ..."            # 三个 workflow 都能 yaml.safe_load
+$ python3 -c "import yaml; ..."            # 两个 workflow 都能 yaml.safe_load
 bash -n                                    # 引擎里 15 个 run 块全部通过
-patch -p1 --dry-run                        # patches/susfs 三个补丁在 cnb 的 20 个受影响文件上 rc=0（无 fuzz 报错）
+patch -p1 --dry-run                        # patches/susfs 四个补丁在 cnb 的 21 个受影响文件上 rc=0（无 fuzz 报错）
 make ARCH=arm64 O=... vendor/sm8150-perf_defconfig + merge_config + scripts/config + olddefconfig
 #   -> CONFIG_KSU=y / CONFIG_KSU_MANUAL_HOOK=y / CONFIG_KSU_SUSFS=y / CONFIG_THREAD_INFO_IN_TASK=y
 ```
